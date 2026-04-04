@@ -255,6 +255,7 @@ alu u_alu(
     .alu_result (alu_result)
     );
 
+//MEM
 assign data_sram_we    = mem_we && valid;
 assign data_sram_addr  = alu_result;
 assign data_sram_wdata = rkd_value;
@@ -262,6 +263,7 @@ assign data_sram_wdata = rkd_value;
 assign mem_result   = data_sram_rdata;
 assign final_result = res_from_mem ? mem_result : alu_result;
 
+//WB
 assign rf_we    = gr_we && valid;
 assign rf_waddr = dest;
 assign rf_wdata = final_result;
