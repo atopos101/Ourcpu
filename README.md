@@ -239,9 +239,29 @@
 19. beq
 20. bne
 
+算术逻辑运算类指令
+21.slti
+22.sltui
+23.andi
+24.ori
+25.xori
+26.sll
+27.srl
+28.sra
+29.pcaddu12i。
+
+乘除运算类指令
+30.mul.w
+31.mulh.w
+32.mulh.wu
+33.div.w
+34.mod.w
+35.div.wu
+36.mod.wu
+
 ## 7. ALU 说明
 
-ALU 控制信号宽度为 12 位（alu_op[11:0]），支持：
+ALU 控制信号宽度为 19 位（alu_op[18:0]），支持：
 
 - add/sub
 - slt/sltu
