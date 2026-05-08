@@ -1,4 +1,4 @@
-﻿# myCPU：20 条 LoongArch 指令的五级流水线 CPU（含阻塞冲突处理与数据前递）
+﻿# myCPU：36 条 LoongArch 指令的五级流水线 CPU（含阻塞冲突处理与数据前递）
 
 ## 1. 项目简介
 
