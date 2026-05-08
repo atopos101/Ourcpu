@@ -18,11 +18,11 @@ module exe_stage(
     output [ 3:0] data_sram_we   ,
     output [31:0] data_sram_addr ,
     output [31:0] data_sram_wdata,
-    // Ö´ÐÐ¼¶Ä¿µÄ²Ù×÷Êý¼Ä´æÆ÷ºÅ
+    // Ö´ï¿½Ð¼ï¿½Ä¿ï¿½Ä²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä´ï¿½ï¿½ï¿½ï¿½ï¿½
     output [4:0] es_to_ds_dest,
-    // Ö´ÐÐ¼¶ÊÇ·ñÎªloadÖ¸Áî
+    // Ö´ï¿½Ð¼ï¿½ï¿½Ç·ï¿½ÎªloadÖ¸ï¿½ï¿½
     output es_to_ds_load_op,
-    // Êý¾ÝÇ°µÝ
+    // ï¿½ï¿½ï¿½ï¿½Ç°ï¿½ï¿½
     output [31:0] es_to_ds_result
 );
 
@@ -31,7 +31,7 @@ wire        es_ready_go   ;
 
 reg  [`DS_TO_ES_BUS_WD -1:0] ds_to_es_bus_r;
 
-wire [11:0] alu_op      ;
+wire [18:0] alu_op      ;
 wire        es_load_op;
 wire        src1_is_pc;
 wire        src2_is_imm;
