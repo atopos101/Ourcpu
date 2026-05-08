@@ -1,0 +1,82 @@
+#-----------------------------------------------------------
+# Vivado v2019.1 (64-bit)
+# SW Build 2552052 on Fri May 24 14:49:42 MDT 2019
+# IP Build 2548770 on Fri May 24 18:01:18 MDT 2019
+# Start of session at: Fri May  8 09:39:57 2026
+# Process ID: 26120
+# Current directory: C:/Users/kl42c/Documents/GitHub/Ourcpu/output/exp11/soc_verify/soc_bram/run_vivado
+# Command line: vivado.exe -mode batch -source C:/Users/kl42c/Documents/GitHub/Ourcpu/output/exp11/soc_verify/soc_bram/run_vivado/run_func_sim.tcl
+# Log file: C:/Users/kl42c/Documents/GitHub/Ourcpu/output/exp11/soc_verify/soc_bram/run_vivado/vivado.log
+# Journal file: C:/Users/kl42c/Documents/GitHub/Ourcpu/output/exp11/soc_verify/soc_bram/run_vivado\vivado.jou
+#-----------------------------------------------------------
+CRITICAL WARNING: [Common 17-741] No write access right to the local Tcl store at 'C'. XilinxTclStore is reverted to the installation area. If you want to use local Tcl Store, please change the access right and relaunch Vivado.
+source C:/Users/kl42c/Documents/GitHub/Ourcpu/output/exp11/soc_verify/soc_bram/run_vivado/run_func_sim.tcl
+# set script_dir [file dirname [string map {\\ /} [info script]]]
+# source [file join $script_dir create_project.tcl]
+## set script_dir [file dirname [string map {\\ /} [info script]]]
+## set rtl_dir    [file join $script_dir .. rtl]
+## set tb_dir     [file join $script_dir .. testbench]
+## set mycpu_dir  [file join $script_dir .. .. .. myCPU]
+## create_project -force loongson [file join $script_dir project] -part xc7a200tfbg676-1
+INFO: [ProjectBase 1-489] The host OS only allows 260 characters in a normal path. The project is stored in a path with more than 80 characters. If you experience issues with IP, Block Designs, or files not being found, please consider moving the project to a location with a shorter path. Alternately consider using the OS subst command to map part of the path to a drive letter.
+Current project path is 'C:/Users/kl42c/Documents/GitHub/Ourcpu/output/exp11/soc_verify/soc_bram/run_vivado/project'
+## set rtl_files [glob -nocomplain \
+##     [file join $rtl_dir *.v] \
+##     [file join $rtl_dir BRIDGE *.v] \
+##     [file join $rtl_dir CONFREG *.v]]
+## if {[llength $rtl_files] > 0} {
+##     add_files -scan_for_includes $rtl_files
+## }
+## set ip_files [glob -nocomplain [file join $rtl_dir xilinx_ip * *.xci]]
+## if {[llength $ip_files] > 0} {
+##     add_files -quiet $ip_files
+## }
+## add_files -fileset sim_1 [file join $tb_dir mycpu_tb.v]
+## set mycpu_files [glob -nocomplain [file join $mycpu_dir *.v] [file join $mycpu_dir *.vh]]
+## if {[llength $mycpu_files] > 0} {
+##     add_files -quiet -scan_for_includes $mycpu_files
+## }
+## add_files -fileset constrs_1 -quiet [file join $script_dir constraints]
+## set_property -name "top" -value "tb_top" -objects [get_filesets sim_1]
+## set_property -name "xsim.simulate.log_all_signals" -value "1" -objects [get_filesets sim_1]
+# set_property -name {xsim.simulate.runtime} -value {all} -objects [get_filesets sim_1]
+# launch_simulation -simset sim_1 -mode behavioral
+INFO: [Vivado 12-5682] Launching behavioral simulation in 'C:/Users/kl42c/Documents/GitHub/Ourcpu/output/exp11/soc_verify/soc_bram/run_vivado/project/loongson.sim/sim_1/behav/xsim'
+INFO: [SIM-utils-51] Simulation object is 'sim_1'
+INFO: [SIM-utils-54] Inspecting design source files for 'tb_top' in fileset 'sim_1'...
+INFO: [USF-XSim-97] Finding global include files...
+INFO: [USF-XSim-98] Fetching design files from 'sim_1'...
+ERROR: [USF-XSim-11] Failed to open file to write (C:/Users/kl42c//GitHub/Ourcpu/output/exp11/soc_verify/soc_bram/run_vivado/project/loongson.sim/sim_1/behav/xsim/xsim.ini)
+ERROR: [Common 17-39] 'send_msg_id' failed due to earlier errors.
+
+    while executing
+"send_msg_id USF-XSim-011 ERROR "Failed to open file to write ($file)\n""
+    invoked from within
+"if {[catch {open $file w} fh]} {
+    send_msg_id USF-XSim-011 ERROR "Failed to open file to write ($file)\n"
+    return 1
+  }"
+    (procedure "usf_xsim_write_setup_file" line 16)
+    invoked from within
+"usf_xsim_write_setup_file"
+    invoked from within
+"if { $b_create_default_ini } {
+    usf_xsim_write_setup_file
+  }"
+    (procedure "usf_xsim_setup_simulation" line 136)
+    invoked from within
+"usf_xsim_setup_simulation"
+    invoked from within
+"if { [usf_xsim_setup_simulation] } {
+    return 1
+  }"
+    (procedure "tclapp::xilinx::xsim::setup" line 19)
+    invoked from within
+"tclapp::xilinx::xsim::setup { -simset sim_1 -mode behavioral -run_dir C:/Users/kl42c/Documents/GitHub/Ourcpu/output/exp11/soc_verify/soc_bram/run_viva..."
+ERROR: [Vivado 12-4473] Detected error while running simulation. Please correct the issue and retry this operation.
+ERROR: [Common 17-39] 'launch_simulation' failed due to earlier errors.
+
+    while executing
+"launch_simulation -simset sim_1 -mode behavioral"
+    (file "C:/Users/kl42c/Documents/GitHub/Ourcpu/output/exp11/soc_verify/soc_bram/run_vivado/run_func_sim.tcl" line 4)
+INFO: [Common 17-206] Exiting Vivado at Fri May  8 09:40:04 2026...

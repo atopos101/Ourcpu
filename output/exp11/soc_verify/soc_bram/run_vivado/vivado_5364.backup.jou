@@ -1,0 +1,12 @@
+#-----------------------------------------------------------
+# Vivado v2019.1 (64-bit)
+# SW Build 2552052 on Fri May 24 14:49:42 MDT 2019
+# IP Build 2548770 on Fri May 24 18:01:18 MDT 2019
+# Start of session at: Fri May  8 09:39:22 2026
+# Process ID: 5364
+# Current directory: C:/Users/kl42c/Documents/GitHub/Ourcpu/output/exp11/soc_verify/soc_bram/run_vivado
+# Command line: vivado.exe -mode batch -source C:/Users/kl42c/Documents/GitHub/Ourcpu/output/exp11/soc_verify/soc_bram/run_vivado/run_func_sim.tcl
+# Log file: C:/Users/kl42c/Documents/GitHub/Ourcpu/output/exp11/soc_verify/soc_bram/run_vivado/vivado.log
+# Journal file: C:/Users/kl42c/Documents/GitHub/Ourcpu/output/exp11/soc_verify/soc_bram/run_vivado\vivado.jou
+#-----------------------------------------------------------
+source C:/Users/kl42c/Documents/GitHub/Ourcpu/output/exp11/soc_verify/soc_bram/run_vivado/run_func_sim.tcl

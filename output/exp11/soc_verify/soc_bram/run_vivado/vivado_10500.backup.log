@@ -1,0 +1,36 @@
+#-----------------------------------------------------------
+# Vivado v2019.1 (64-bit)
+# SW Build 2552052 on Fri May 24 14:49:42 MDT 2019
+# IP Build 2548770 on Fri May 24 18:01:18 MDT 2019
+# Start of session at: Fri May  8 09:37:41 2026
+# Process ID: 10500
+# Current directory: C:/Users/kl42c/Documents/GitHub/Ourcpu/output/exp11/soc_verify/soc_bram/run_vivado
+# Command line: vivado.exe -mode batch -source .\run_func_sim.tcl
+# Log file: C:/Users/kl42c/Documents/GitHub/Ourcpu/output/exp11/soc_verify/soc_bram/run_vivado/vivado.log
+# Journal file: C:/Users/kl42c/Documents/GitHub/Ourcpu/output/exp11/soc_verify/soc_bram/run_vivado\vivado.jou
+#-----------------------------------------------------------
+CRITICAL WARNING: [Common 17-741] No write access right to the local Tcl store at 'C'. XilinxTclStore is reverted to the installation area. If you want to use local Tcl Store, please change the access right and relaunch Vivado.
+source {.\run_func_sim.tcl}
+# source ./create_project.tcl
+## create_project -force loongson ./project -part xc7a200tfbg676-1
+INFO: [ProjectBase 1-489] The host OS only allows 260 characters in a normal path. The project is stored in a path with more than 80 characters. If you experience issues with IP, Block Designs, or files not being found, please consider moving the project to a location with a shorter path. Alternately consider using the OS subst command to map part of the path to a drive letter.
+Current project path is 'C:/Users/kl42c/Documents/GitHub/Ourcpu/output/exp11/soc_verify/soc_bram/run_vivado/project'
+couldn't read directory "C:/Users/kl42c/GitHub/Ourcpu/output/exp11/soc_verify/soc_bram/rtl/*.v": no such file or directory
+    while executing
+"glob -nocomplain -directory ../rtl *.v"
+    invoked from within
+"concat \
+    [glob -nocomplain -directory ../rtl *.v] \
+    [glob -nocomplain -directory ../rtl/BRIDGE *.v] \
+    [glob -nocomplain -directory ../rtl/..."
+    invoked from within
+"set rtl_files [concat \
+    [glob -nocomplain -directory ../rtl *.v] \
+    [glob -nocomplain -directory ../rtl/BRIDGE *.v] \
+    [glob -nocomplain -di..."
+    (file "./create_project.tcl" line 4)
+
+    while executing
+"source ./create_project.tcl"
+    (file ".\run_func_sim.tcl" line 1)
+INFO: [Common 17-206] Exiting Vivado at Fri May  8 09:37:47 2026...

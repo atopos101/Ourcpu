@@ -1,0 +1,20 @@
+#-----------------------------------------------------------
+# Vivado v2019.1 (64-bit)
+# SW Build 2552052 on Fri May 24 14:49:42 MDT 2019
+# IP Build 2548770 on Fri May 24 18:01:18 MDT 2019
+# Start of session at: Fri May  8 09:39:22 2026
+# Process ID: 5364
+# Current directory: C:/Users/kl42c/Documents/GitHub/Ourcpu/output/exp11/soc_verify/soc_bram/run_vivado
+# Command line: vivado.exe -mode batch -source C:/Users/kl42c/Documents/GitHub/Ourcpu/output/exp11/soc_verify/soc_bram/run_vivado/run_func_sim.tcl
+# Log file: C:/Users/kl42c/Documents/GitHub/Ourcpu/output/exp11/soc_verify/soc_bram/run_vivado/vivado.log
+# Journal file: C:/Users/kl42c/Documents/GitHub/Ourcpu/output/exp11/soc_verify/soc_bram/run_vivado\vivado.jou
+#-----------------------------------------------------------
+CRITICAL WARNING: [Common 17-741] No write access right to the local Tcl store at 'C'. XilinxTclStore is reverted to the installation area. If you want to use local Tcl Store, please change the access right and relaunch Vivado.
+source C:/Users/kl42c/Documents/GitHub/Ourcpu/output/exp11/soc_verify/soc_bram/run_vivado/run_func_sim.tcl
+# set script_dir [file normalize [file dirname [string map {\\ /} [info script]]]]
+# source [file join $script_dir create_project.tcl]
+couldn't read file "C:/Users/kl42c//GitHub/Ourcpu/output/exp11/soc_verify/soc_bram/run_vivado/create_project.tcl": no such file or directory
+    while executing
+"source [file join $script_dir create_project.tcl]"
+    (file "C:/Users/kl42c/Documents/GitHub/Ourcpu/output/exp11/soc_verify/soc_bram/run_vivado/run_func_sim.tcl" line 2)
+INFO: [Common 17-206] Exiting Vivado at Fri May  8 09:39:23 2026...

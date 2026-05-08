@@ -1,0 +1,25 @@
+#-----------------------------------------------------------
+# Vivado v2019.1 (64-bit)
+# SW Build 2552052 on Fri May 24 14:49:42 MDT 2019
+# IP Build 2548770 on Fri May 24 18:01:18 MDT 2019
+# Start of session at: Fri May  8 09:38:19 2026
+# Process ID: 14460
+# Current directory: C:/Users/kl42c/Documents/GitHub/Ourcpu/output/exp11/soc_verify/soc_bram/run_vivado
+# Command line: vivado.exe -mode batch -source .\run_func_sim.tcl
+# Log file: C:/Users/kl42c/Documents/GitHub/Ourcpu/output/exp11/soc_verify/soc_bram/run_vivado/vivado.log
+# Journal file: C:/Users/kl42c/Documents/GitHub/Ourcpu/output/exp11/soc_verify/soc_bram/run_vivado\vivado.jou
+#-----------------------------------------------------------
+CRITICAL WARNING: [Common 17-741] No write access right to the local Tcl store at 'C'. XilinxTclStore is reverted to the installation area. If you want to use local Tcl Store, please change the access right and relaunch Vivado.
+source {.\run_func_sim.tcl}
+# source ./create_project.tcl
+## set script_dir [file normalize [file dirname [info script]]]
+## set rtl_dir    [file normalize [file join $script_dir .. rtl]]
+## set tb_dir     [file normalize [file join $script_dir .. testbench]]
+## set mycpu_dir  [file normalize [file join $script_dir .. .. .. myCPU]]
+## create_project -force loongson [file join $script_dir project] -part xc7a200tfbg676-1
+ERROR: [ProjectBase 2-116] Unable to create project directory: 'C:/Users/kl42c/GitHub/Ourcpu/output/exp11/soc_verify/soc_bram/run_vivado/project'.
+
+    while executing
+"source ./create_project.tcl"
+    (file ".\run_func_sim.tcl" line 1)
+INFO: [Common 17-206] Exiting Vivado at Fri May  8 09:38:21 2026...
