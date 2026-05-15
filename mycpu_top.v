@@ -1,9 +1,10 @@
-
 `include "mycpu.vh"
 
 module mycpu_top(
     input         clk,
     input         resetn,
+    // 8 external hardware interrupt lines (tie to 0 if unused)
+    input  [7:0]  hw_int_in,
     // inst sram interface
     output        inst_sram_en,
     output [ 3:0] inst_sram_we,
@@ -22,6 +23,7 @@ module mycpu_top(
     output [ 4:0] debug_wb_rf_wnum,
     output [31:0] debug_wb_rf_wdata
 );
+
 reg         reset;
 always @(posedge clk) reset <= ~resetn;
 
@@ -47,6 +49,31 @@ wire [31:0] es_to_ds_result;
 wire [31:0] ms_to_ds_result;
 wire [31:0] ws_to_ds_result;
 
+// exception interface
+wire        flush;
+wire [31:0] ex_entry;
+
+// ertn interface
+wire        ertn_flush;
+wire [31:0] ertn_pc;
+
+// csr hazard tracking
+wire        es_csr_we;
+wire [13:0] es_csr_num;
+wire        es_is_ertn;
+
+wire [7:0] hw_int_in_safe;
+assign hw_int_in_safe = {
+    (hw_int_in[7] === 1'b1),
+    (hw_int_in[6] === 1'b1),
+    (hw_int_in[5] === 1'b1),
+    (hw_int_in[4] === 1'b1),
+    (hw_int_in[3] === 1'b1),
+    (hw_int_in[2] === 1'b1),
+    (hw_int_in[1] === 1'b1),
+    (hw_int_in[0] === 1'b1)
+};
+
 // IF stage
 if_stage if_stage(
     .clk            (clk            ),
@@ -55,6 +82,12 @@ if_stage if_stage(
     .ds_allowin     (ds_allowin     ),
     //brbus
     .br_bus         (br_bus         ),
+    // exception
+    .flush          (flush          ),
+    .ex_entry       (ex_entry       ),
+    // ertn
+    .ertn_flush     (ertn_flush     ),
+    .ertn_pc        (ertn_pc        ),
     //outputs
     .fs_to_ds_valid (fs_to_ds_valid ),
     .fs_to_ds_bus   (fs_to_ds_bus   ),
@@ -65,10 +98,12 @@ if_stage if_stage(
     .inst_sram_wdata(inst_sram_wdata),
     .inst_sram_rdata(inst_sram_rdata)
 );
+
 // ID stage
 id_stage id_stage(
     .clk            (clk            ),
     .reset          (reset          ),
+    .flush          (flush          ),
     //allowin
     .es_allowin     (es_allowin     ),
     .ds_allowin     (ds_allowin     ),
@@ -89,8 +124,14 @@ id_stage id_stage(
     .es_to_ds_load_op(es_to_ds_load_op),
     .es_to_ds_result(es_to_ds_result),
     .ms_to_ds_result(ms_to_ds_result),
-    .ws_to_ds_result(ws_to_ds_result)
+    .ws_to_ds_result(ws_to_ds_result),
+    // csr hazard tracking
+    .es_csr_we      (es_csr_we      ),
+    .es_csr_num     (es_csr_num     ),
+    .es_is_ertn     (es_is_ertn     ),
+    .ertn_flush     (ertn_flush     )
 );
+
 // EXE stage
 exe_stage exe_stage(
     .clk            (clk            ),
@@ -109,11 +150,24 @@ exe_stage exe_stage(
     .data_sram_we   (data_sram_we  ),
     .data_sram_addr (data_sram_addr ),
     .data_sram_wdata(data_sram_wdata),
-    //hazard detect info
+    // hazard detect info
     .es_to_ds_dest  (es_to_ds_dest  ),
     .es_to_ds_load_op(es_to_ds_load_op),
-    .es_to_ds_result(es_to_ds_result)
+    .es_to_ds_result(es_to_ds_result),
+    // exception interface
+    .flush          (flush          ),
+    .ex_entry       (ex_entry       ),
+    // ertn interface
+    .ertn_flush     (ertn_flush     ),
+    .ertn_pc        (ertn_pc        ),
+    // csr hazard tracking
+    .es_csr_we      (es_csr_we      ),
+    .es_csr_num     (es_csr_num     ),
+    .es_is_ertn     (es_is_ertn     ),
+    // interrupt / csr interface
+    .hw_int_in      (hw_int_in_safe )
 );
+
 // MEM stage
 mem_stage mem_stage(
     .clk            (clk            ),
@@ -129,10 +183,11 @@ mem_stage mem_stage(
     .ms_to_ws_bus   (ms_to_ws_bus   ),
     //from data-sram
     .data_sram_rdata(data_sram_rdata),
-    //hazard detect info
+    // hazard detect info
     .ms_to_ds_dest  (ms_to_ds_dest  ),
     .ms_to_ds_result(ms_to_ds_result)
 );
+
 // WB stage
 wb_stage wb_stage(
     .clk            (clk            ),
@@ -144,15 +199,14 @@ wb_stage wb_stage(
     .ms_to_ws_bus   (ms_to_ws_bus   ),
     //to rf: for write back
     .ws_to_rf_bus   (ws_to_rf_bus   ),
-    //hazard detect info
+    // hazard detect info
     .ws_to_ds_dest  (ws_to_ds_dest  ),
     .ws_to_ds_result(ws_to_ds_result),
-    //trace debug interface
+    // trace debug interface
     .debug_wb_pc      (debug_wb_pc      ),
     .debug_wb_rf_we   (debug_wb_rf_we   ),
     .debug_wb_rf_wnum (debug_wb_rf_wnum ),
     .debug_wb_rf_wdata(debug_wb_rf_wdata)
 );
-
 
 endmodule
