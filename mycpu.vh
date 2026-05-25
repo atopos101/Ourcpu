@@ -4,7 +4,7 @@
 `define BR_BUS_WD       34
 `define FS_TO_DS_BUS_WD 65    // {inst[31:0], pc[31:0], fs_ex}
 `define DS_TO_ES_BUS_WD 199   // 180 + ds_ex + ds_ecode + ds_esubcode + rdcnt fields
-`define ES_TO_MS_BUS_WD 74    // unchanged
+`define ES_TO_MS_BUS_WD 75
 `define MS_TO_WS_BUS_WD 70    // unchanged
 `define WS_TO_RF_BUS_WD 38    // unchanged
 

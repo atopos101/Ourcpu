@@ -22,6 +22,8 @@ module id_stage(
     input [4:0] ms_to_ds_dest,
     input [4:0] ws_to_ds_dest,
     input es_to_ds_load_op,
+    input ms_to_ds_load_op,
+    input [4:0] ms_to_ds_load_dest,
     input [31:0] es_to_ds_result,
     input [31:0] ms_to_ds_result,
     input [31:0] ws_to_ds_result,
@@ -452,7 +454,7 @@ assign br_taken = (   inst_beq  &&  rj_eq_rd
                    || inst_jirl
                    || inst_bl
                    || inst_b
-                  )  && ds_valid && ~load_stall;
+                  )  && ds_valid && ~load_stall && (fs_ex !== 1'b1);
 
 assign inst_no_dest = store_op | inst_b | branch_op;
 
@@ -479,9 +481,19 @@ assign rd_wait = ~src_no_rd && (rd != 5'b00000)
 assign br_target = (branch_op || inst_bl || inst_b) ? (ds_pc + br_offs) :
                                                    /*inst_jirl*/ (rj_value + jirl_offs);
 
-assign load_stall = es_to_ds_load_op & (((rj == es_to_ds_dest) & rj_wait) |
-                                        ((rk == es_to_ds_dest) & rk_wait) |
-                                        ((rd == es_to_ds_dest) & rd_wait));
+wire es_load_stall;
+wire ms_load_stall;
+
+assign es_load_stall = es_to_ds_load_op & (((rj == es_to_ds_dest) & rj_wait) |
+                                           ((rk == es_to_ds_dest) & rk_wait) |
+                                           ((rd == es_to_ds_dest) & rd_wait));
+
+assign ms_load_stall = ms_to_ds_load_op && (ms_to_ds_load_dest != 5'b0) &&
+                       (((rj == ms_to_ds_load_dest) & ~src_no_rj) |
+                        ((rk == ms_to_ds_load_dest) & ~src_no_rk) |
+                        ((rd == ms_to_ds_load_dest) & ~src_no_rd));
+
+assign load_stall = es_load_stall || ms_load_stall;
 assign br_stall = load_stall & br_taken & ds_valid;
 assign br_bus = {br_stall, br_taken, br_target};
 
@@ -523,7 +535,7 @@ assign csr_stall = ds_valid && (
 // Exception detection in ID stage
 // ============================================================
 // fs_ex comes from IF stage (ADEF)
-wire inst_ine = ds_valid && ~inst_valid;
+wire inst_ine = ds_valid && (fs_ex !== 1'b1) && ~inst_valid;
 
 // ID exception signals (passed to ES)
 wire ds_ex = (fs_ex || inst_break || inst_ine) && ds_valid;
@@ -594,14 +606,14 @@ assign ds_allowin     = !ds_valid || ds_ready_go && es_allowin;
 assign ds_to_es_valid = ds_valid && ds_ready_go;
 
 always @(posedge clk) begin
-    if (reset || flush || ertn_flush) begin
+    if (reset || flush || ertn_flush || br_taken) begin
         ds_valid <= 1'b0;
     end
     else if (ds_allowin) begin
         ds_valid <= fs_to_ds_valid;
     end
 
-    if (fs_to_ds_valid && ds_allowin && !flush) begin
+    if (fs_to_ds_valid && ds_allowin && !flush && !br_taken) begin
         fs_to_ds_bus_r <= fs_to_ds_bus;
     end
 end

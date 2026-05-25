@@ -15,9 +15,9 @@ module wb_stage(
     output wire [ 3:0] debug_wb_rf_we  ,
     output wire [ 4:0] debug_wb_rf_wnum,
     output wire [31:0] debug_wb_rf_wdata,
-    // Ğ´»Ø¼¶Ä¿µÄ²Ù×÷Êı¼Ä´æÆ÷ºÅ
+    // å†™å›çº§ç›®çš„æ“ä½œæ•°å¯„å­˜å™¨å·
     output wire [4:0] ws_to_ds_dest,
-    // Êı¾İÇ°µİ
+    // æ•°æ®å‰é€’
     output wire [31:0] ws_to_ds_result
 );
 
@@ -38,6 +38,9 @@ assign {ws_gr_we       ,  //69:69
 wire        rf_we;
 wire [4 :0] rf_waddr;
 wire [31:0] rf_wdata;
+reg  [31:0] debug_wb_pc_r;
+wire        ws_pc_known;
+wire        ws_debug_valid;
 assign ws_to_rf_bus = {rf_we   ,  //37:37
                        rf_waddr,  //36:32
                        rf_wdata   //31:0
@@ -63,10 +66,22 @@ assign rf_waddr = ws_dest;
 assign rf_wdata = ws_final_result;
 
 // debug info generate
-assign debug_wb_pc       = ws_pc;
-assign debug_wb_rf_we    = {4{rf_we}};
-assign debug_wb_rf_wnum  = ws_dest;
-assign debug_wb_rf_wdata = ws_final_result;
+assign ws_pc_known    = (ws_pc === ws_pc);
+assign ws_debug_valid = (ws_valid === 1'b1) && ws_pc_known;
+
+always @(posedge clk) begin
+    if (reset) begin
+        debug_wb_pc_r <= 32'b0;
+    end
+    else if (ws_debug_valid) begin
+        debug_wb_pc_r <= ws_pc;
+    end
+end
+
+assign debug_wb_pc       = ws_debug_valid ? ws_pc : debug_wb_pc_r;
+assign debug_wb_rf_we    = ws_debug_valid ? {4{rf_we}}      : 4'b0;
+assign debug_wb_rf_wnum  = ws_debug_valid ? ws_dest         : 5'b0;
+assign debug_wb_rf_wdata = ws_debug_valid ? ws_final_result : 32'b0;
 
 assign ws_to_ds_dest = ws_dest & {5{ws_valid}} & {5{ws_gr_we}};
 assign ws_to_ds_result = ws_final_result;

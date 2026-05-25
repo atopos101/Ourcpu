@@ -13,10 +13,15 @@ module exe_stage(
     output                         es_to_ms_valid,
     output [`ES_TO_MS_BUS_WD -1:0] es_to_ms_bus  ,
     // data sram interface
-    output        data_sram_en   ,
-    output [ 3:0] data_sram_we   ,
-    output [31:0] data_sram_addr ,
-    output [31:0] data_sram_wdata,
+    output        data_sram_req    ,
+    output        data_sram_wr     ,
+    output [ 1:0] data_sram_size   ,
+    output [ 3:0] data_sram_wstrb  ,
+    output [31:0] data_sram_addr   ,
+    output [31:0] data_sram_wdata  ,
+    input         data_sram_addr_ok,
+    input         data_sram_data_ok,
+    input  [31:0] data_sram_rdata  ,
     // forward to id
     output [4:0] es_to_ds_dest,
     output es_to_ds_load_op,
@@ -303,19 +308,22 @@ assign st_w_wdata = rkd_value;
 
 // Suppress memory access on ALE
 wire mem_access_ok = es_valid && !ale_detected;
+wire es_mem_access = (res_from_mem || es_mem_we) && mem_access_ok;
 
-assign data_sram_en    = 1'b1;
-assign data_sram_we    = es_mem_we && mem_access_ok ?
+assign data_sram_req    = es_valid && es_mem_access && ms_allowin;
+assign data_sram_wr     = es_mem_we && mem_access_ok;
+assign data_sram_size   = mem_size;
+assign data_sram_wstrb  = es_mem_we && mem_access_ok ?
                             ((mem_size == 2'b00) ? st_b_we :
                              (mem_size == 2'b01) ? st_h_we : st_w_we) : 4'h0;
-assign data_sram_addr  = alu_result;
-assign data_sram_wdata = (mem_size == 2'b00) ? st_b_wdata :
+assign data_sram_addr   = alu_result;
+assign data_sram_wdata  = (mem_size == 2'b00) ? st_b_wdata :
                          (mem_size == 2'b01) ? st_h_wdata : st_w_wdata;
 
 // ============================================================
 // Pipeline control
 // ============================================================
-assign es_ready_go    = 1'b1;
+assign es_ready_go    = !es_mem_access || data_sram_addr_ok;
 assign es_allowin     = !es_valid || es_ready_go && ms_allowin;
 assign es_to_ms_valid = es_valid && es_ready_go;
 
@@ -335,7 +343,8 @@ end
 // ============================================================
 // Bus output
 // ============================================================
-assign es_to_ms_bus = {res_from_mem,  //73:73 1
+assign es_to_ms_bus = {es_mem_access, //74:74 1
+                       res_from_mem,  //73:73 1
                        mem_size    ,  //72:71 2
                        mem_unsigned,  //70:70 1
                        exe_gr_we   ,  //69:69 1
