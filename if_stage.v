@@ -13,6 +13,12 @@ module if_stage(
     // ertn interface
     input                          ertn_flush     ,
     input  [31:0]                  ertn_pc        ,
+    // address translation
+    output [31:0]                  inst_vaddr     ,
+    input  [31:0]                  inst_paddr     ,
+    input                          inst_trans_ex  ,
+    input  [ 5:0]                  inst_trans_ecode,
+    input  [ 8:0]                  inst_trans_esubcode,
     //to ds
     output                         fs_to_ds_valid ,
     output [`FS_TO_DS_BUS_WD -1:0] fs_to_ds_bus   ,
@@ -45,28 +51,43 @@ reg  [31:0] fs_inst;
 reg  [31:0] fs_pc;
 
 reg  [31:0] fetch_pc;
+reg  [31:0] req_pc;
+reg         req_cancel;
 reg         resp_pending;
 reg  [31:0] resp_pc;
 reg         resp_cancel;
 reg         adef_pending;
+reg         resp_ex;
+reg  [ 5:0] resp_ecode;
+reg  [ 8:0] resp_esubcode;
+reg         fs_ex;
+reg  [ 5:0] fs_ecode;
+reg  [ 8:0] fs_esubcode;
 
 wire        redirect;
 wire [31:0] redirect_pc;
 wire        inst_addr_hs;
 wire        inst_data_hs;
 wire        fs_handoff;
-wire        fetch_adef;
+wire        fetch_ex;
+wire [ 5:0] fetch_ecode;
+wire [ 8:0] fetch_esubcode;
 
 // ============================================================
-// ADEF detection: fetch address not 4-byte aligned
+// Fetch exception detection
 // ============================================================
-wire fs_adef;
-assign fs_adef = fs_valid && (fs_pc[1:0] != 2'b00);
+wire fetch_adef;
+assign fetch_adef = fs_req && (req_pc[1:0] != 2'b00);
+assign fetch_ex   = fetch_adef || (fs_req && inst_trans_ex);
+assign fetch_ecode = fetch_adef ? `ECODE_ADEF : inst_trans_ecode;
+assign fetch_esubcode = fetch_adef ? 9'h000 : inst_trans_esubcode;
 
-// fs_to_ds_bus: {inst[31:0], pc[31:0], fs_ex}
+// fs_to_ds_bus: {inst[31:0], pc[31:0], fs_ex, fs_ecode, fs_esubcode}
 assign fs_to_ds_bus = {fs_inst,
                        fs_pc,
-                       fs_adef   // ADEF flag
+                       fs_ex,
+                       fs_ecode,
+                       fs_esubcode
                       };
 
 // pre-IF stage
@@ -80,16 +101,16 @@ assign redirect_pc  = ertn_flush ? ertn_pc  :
 assign seq_pc         = fs_pc + 3'h4;
 assign fs_to_ds_valid =  fs_valid;
 assign fs_handoff     =  fs_to_ds_valid && ds_allowin;
-assign fetch_adef      = fs_req && (fetch_pc[1:0] != 2'b00);
+assign inst_vaddr      = fs_req ? req_pc : fetch_pc;
 
-assign inst_addr_hs   = fetch_adef || (inst_sram_req && inst_sram_addr_ok);
+assign inst_addr_hs   = fetch_ex || (inst_sram_req && inst_sram_addr_ok);
 assign inst_data_hs   = resp_pending && inst_sram_data_ok;
 
-assign inst_sram_req    = fs_req && !fetch_adef;
+assign inst_sram_req    = fs_req && !fetch_ex;
 assign inst_sram_wr     = 1'b0;
 assign inst_sram_size   = 2'b10;
 assign inst_sram_wstrb  = 4'b0000;
-assign inst_sram_addr   = fetch_pc;
+assign inst_sram_addr   = inst_paddr;
 assign inst_sram_wdata  = 32'b0;
 
 always @(posedge clk) begin
@@ -110,6 +131,9 @@ always @(posedge clk) begin
     if (reset) begin
         fetch_pc <= 32'h1c000000;
         fs_pc    <= 32'h1c000000;
+        fs_ex    <= 1'b0;
+        fs_ecode <= 6'b0;
+        fs_esubcode <= 9'b0;
     end
     else begin
         if (redirect) begin
@@ -121,6 +145,9 @@ always @(posedge clk) begin
 
         if ((inst_data_hs || adef_pending) && !resp_cancel && !redirect) begin
             fs_pc <= resp_pc;
+            fs_ex <= resp_ex;
+            fs_ecode <= resp_ecode;
+            fs_esubcode <= resp_esubcode;
         end
     end
 end
@@ -128,18 +155,27 @@ end
 always @(posedge clk) begin
     if (reset) begin
         fs_req      <= 1'b0;
+        req_pc      <= 32'b0;
+        req_cancel  <= 1'b0;
         resp_pending <= 1'b0;
         resp_pc      <= 32'b0;
         resp_cancel  <= 1'b0;
         adef_pending <= 1'b0;
+        resp_ex      <= 1'b0;
+        resp_ecode   <= 6'b0;
+        resp_esubcode <= 9'b0;
     end
     else begin
         if (inst_addr_hs) begin
             fs_req <= 1'b0;
-            resp_pending <= !fetch_adef;
-            resp_pc <= fetch_pc;
-            resp_cancel <= redirect;
-            adef_pending <= fetch_adef;
+            req_cancel <= 1'b0;
+            resp_pending <= !fetch_ex;
+            resp_pc <= req_pc;
+            resp_cancel <= redirect || req_cancel;
+            adef_pending <= fetch_ex;
+            resp_ex <= fetch_ex;
+            resp_ecode <= fetch_ecode;
+            resp_esubcode <= fetch_esubcode;
         end
 
         if (inst_data_hs) begin
@@ -153,17 +189,24 @@ always @(posedge clk) begin
         end
 
         if (redirect) begin
-            resp_cancel <= resp_pending || (inst_addr_hs && !inst_sram_data_ok);
+            resp_cancel <= resp_pending || (inst_addr_hs && !inst_sram_data_ok) || req_cancel;
             adef_pending <= 1'b0;
             if (fs_req && !inst_sram_addr_ok) begin
                 fs_req <= 1'b1;
+                req_cancel <= 1'b1;
             end
             else if (!fs_req && !resp_pending) begin
                 fs_req <= 1'b1;
+                req_pc <= redirect_pc;
+                req_cancel <= 1'b0;
+                resp_cancel <= 1'b0;
             end
         end
         else if (to_fs_valid && !fs_req && !resp_pending && !fs_valid) begin
             fs_req <= 1'b1;
+            req_pc <= fetch_pc;
+            req_cancel <= 1'b0;
+            resp_cancel <= 1'b0;
         end
     end
 end

@@ -1,3 +1,5 @@
+`include "mycpu.vh"
+
 module csr_regfile(
     input         clk,
     input         reset,
@@ -25,7 +27,40 @@ module csr_regfile(
     output [31:0] cnt_low,
     output [31:0] cnt_high,
     // TID read (for rdcntid instruction)
-    output [31:0] tid_val
+    output [31:0] tid_val,
+    // Address translation CSR values
+    output [31:0] csr_crmd,
+    output [31:0] csr_dmw0,
+    output [31:0] csr_dmw1,
+    // TLB CSR values used by TLB instructions
+    output [31:0] csr_tlbidx,
+    output [31:0] csr_tlbehi,
+    output [31:0] csr_tlbelo0,
+    output [31:0] csr_tlbelo1,
+    output [ 9:0] csr_asid,
+    output [ 3:0] csr_tlbidx_index,
+    output [ 5:0] csr_tlbidx_ps,
+    output        csr_tlbidx_ne,
+    // TLB instruction side effects
+    input         tlbsrch_en,
+    input         tlbsrch_found,
+    input  [ 3:0] tlbsrch_index,
+    input         tlbrd_en,
+    input         tlbrd_e,
+    input  [18:0] tlbrd_vppn,
+    input  [ 5:0] tlbrd_ps,
+    input  [ 9:0] tlbrd_asid,
+    input         tlbrd_g,
+    input  [19:0] tlbrd_ppn0,
+    input  [ 1:0] tlbrd_plv0,
+    input  [ 1:0] tlbrd_mat0,
+    input         tlbrd_d0,
+    input         tlbrd_v0,
+    input  [19:0] tlbrd_ppn1,
+    input  [ 1:0] tlbrd_plv1,
+    input  [ 1:0] tlbrd_mat1,
+    input         tlbrd_d1,
+    input         tlbrd_v1
 );
 
 // ============================================================
@@ -38,6 +73,11 @@ localparam CSR_ESTAT  = 14'h05;
 localparam CSR_ERA    = 14'h06;
 localparam CSR_BADV   = 14'h07;
 localparam CSR_EENTRY = 14'h0C;
+localparam CSR_TLBIDX = 14'h10;
+localparam CSR_TLBEHI = 14'h11;
+localparam CSR_TLBELO0= 14'h12;
+localparam CSR_TLBELO1= 14'h13;
+localparam CSR_ASID   = 14'h18;
 localparam CSR_SAVE0  = 14'h30;
 localparam CSR_SAVE1  = 14'h31;
 localparam CSR_SAVE2  = 14'h32;
@@ -46,6 +86,9 @@ localparam CSR_TID    = 14'h40;
 localparam CSR_TCFG   = 14'h41;
 localparam CSR_TVAL   = 14'h42;
 localparam CSR_TICLR  = 14'h44;
+localparam CSR_TLBRENTRY = 14'h88;
+localparam CSR_DMW0   = 14'h180;
+localparam CSR_DMW1   = 14'h181;
 
 // ============================================================
 // CSR register storage
@@ -57,6 +100,11 @@ reg [31:0] estat;
 reg [31:0] era;
 reg [31:0] badv;
 reg [31:0] eentry;
+reg [31:0] tlbidx;
+reg [31:0] tlbehi;
+reg [31:0] tlbelo0;
+reg [31:0] tlbelo1;
+reg [ 9:0] asid;
 reg [31:0] save0;
 reg [31:0] save1;
 reg [31:0] save2;
@@ -64,6 +112,9 @@ reg [31:0] save3;
 reg [31:0] tid;
 reg [31:0] tcfg;
 reg [31:0] tval;
+reg [31:0] tlbrentry;
+reg [31:0] dmw0;
+reg [31:0] dmw1;
 
 // ============================================================
 // Stable counter (free-running, 64-bit)
@@ -86,8 +137,19 @@ wire        timer_will_expire = timer_en && (tval == 32'h1);
 // ============================================================
 // Output assignments
 // ============================================================
-assign ex_entry = eentry;
+assign ex_entry = (wb_ecode == `ECODE_TLBR) ? tlbrentry : eentry;
 assign ertn_pc  = era;
+assign csr_crmd         = crmd;
+assign csr_dmw0         = dmw0;
+assign csr_dmw1         = dmw1;
+assign csr_tlbidx       = tlbidx;
+assign csr_tlbehi       = tlbehi;
+assign csr_tlbelo0      = tlbelo0;
+assign csr_tlbelo1      = tlbelo1;
+assign csr_asid         = asid;
+assign csr_tlbidx_index = tlbidx[3:0];
+assign csr_tlbidx_ps    = tlbidx[29:24];
+assign csr_tlbidx_ne    = tlbidx[31];
 
 // ============================================================
 // Interrupt logic
@@ -125,6 +187,11 @@ always @(*) begin
             CSR_ERA:    csr_rvalue_reg = era;
             CSR_BADV:   csr_rvalue_reg = badv;
             CSR_EENTRY: csr_rvalue_reg = eentry;
+            CSR_TLBIDX: csr_rvalue_reg = tlbidx;
+            CSR_TLBEHI: csr_rvalue_reg = tlbehi;
+            CSR_TLBELO0:csr_rvalue_reg = tlbelo0;
+            CSR_TLBELO1:csr_rvalue_reg = tlbelo1;
+            CSR_ASID:   csr_rvalue_reg = {8'b0, 8'd10, 6'b0, asid};
             CSR_SAVE0:  csr_rvalue_reg = save0;
             CSR_SAVE1:  csr_rvalue_reg = save1;
             CSR_SAVE2:  csr_rvalue_reg = save2;
@@ -133,6 +200,9 @@ always @(*) begin
             CSR_TCFG:   csr_rvalue_reg = tcfg;
             CSR_TVAL:   csr_rvalue_reg = tval;
             CSR_TICLR:  csr_rvalue_reg = 32'b0;  // write-only, reads as 0
+            CSR_TLBRENTRY: csr_rvalue_reg = tlbrentry;
+            CSR_DMW0:   csr_rvalue_reg = dmw0;
+            CSR_DMW1:   csr_rvalue_reg = dmw1;
             default:    csr_rvalue_reg = 32'b0;
         endcase
     end
@@ -148,16 +218,31 @@ wire csr_inst_we = csr_we && !wb_ex;
 wire [31:0] crmd_wdata   = (crmd   & ~csr_wmask) | (csr_wvalue & csr_wmask);
 wire [31:0] prmd_wdata   = (prmd   & ~csr_wmask) | (csr_wvalue & csr_wmask);
 wire [31:0] ecfg_wdata   = (ecfg   & ~csr_wmask) | (csr_wvalue & csr_wmask);
-wire [31:0] ecfg_legal_wdata = ecfg_wdata & 32'h00001fff;
+wire [31:0] ecfg_legal_wdata = ecfg_wdata & 32'h00001bff;
 wire [31:0] era_wdata    = (era    & ~csr_wmask) | (csr_wvalue & csr_wmask);
 wire [31:0] badv_wdata   = (badv   & ~csr_wmask) | (csr_wvalue & csr_wmask);
 wire [31:0] eentry_wdata = (eentry & ~csr_wmask) | (csr_wvalue & csr_wmask);
+wire [31:0] tlbidx_wdata = (tlbidx & ~csr_wmask) | (csr_wvalue & csr_wmask);
+wire [31:0] tlbehi_wdata = (tlbehi & ~csr_wmask) | (csr_wvalue & csr_wmask);
+wire [31:0] tlbelo0_wdata = (tlbelo0 & ~csr_wmask) | (csr_wvalue & csr_wmask);
+wire [31:0] tlbelo1_wdata = (tlbelo1 & ~csr_wmask) | (csr_wvalue & csr_wmask);
+wire [31:0] asid_wdata   = ({22'b0, asid} & ~csr_wmask) | (csr_wvalue & csr_wmask);
 wire [31:0] save0_wdata  = (save0  & ~csr_wmask) | (csr_wvalue & csr_wmask);
 wire [31:0] save1_wdata  = (save1  & ~csr_wmask) | (csr_wvalue & csr_wmask);
 wire [31:0] save2_wdata  = (save2  & ~csr_wmask) | (csr_wvalue & csr_wmask);
 wire [31:0] save3_wdata  = (save3  & ~csr_wmask) | (csr_wvalue & csr_wmask);
 wire [31:0] tid_wdata    = (tid    & ~csr_wmask) | (csr_wvalue & csr_wmask);
 wire [31:0] tcfg_wdata   = (tcfg   & ~csr_wmask) | (csr_wvalue & csr_wmask);
+wire [31:0] tlbrentry_wdata = (tlbrentry & ~csr_wmask) | (csr_wvalue & csr_wmask);
+wire [31:0] dmw0_wdata   = (dmw0   & ~csr_wmask) | (csr_wvalue & csr_wmask);
+wire [31:0] dmw1_wdata   = (dmw1   & ~csr_wmask) | (csr_wvalue & csr_wmask);
+
+wire wb_tlb_ex = wb_ecode == `ECODE_TLBR ||
+                 wb_ecode == `ECODE_PIL  ||
+                 wb_ecode == `ECODE_PIS  ||
+                 wb_ecode == `ECODE_PIF  ||
+                 wb_ecode == `ECODE_PME  ||
+                 wb_ecode == `ECODE_PPI;
 
 // ============================================================
 // Main sequential logic
@@ -171,6 +256,11 @@ always @(posedge clk) begin
         era    <= 32'b0;
         badv   <= 32'b0;
         eentry <= 32'b0;
+        tlbidx <= 32'b0;
+        tlbehi <= 32'b0;
+        tlbelo0 <= 32'b0;
+        tlbelo1 <= 32'b0;
+        asid   <= 10'b0;
         save0  <= 32'b0;
         save1  <= 32'b0;
         save2  <= 32'b0;
@@ -178,6 +268,9 @@ always @(posedge clk) begin
         tid    <= 32'b0;
         tcfg   <= 32'b0;
         tval   <= 32'b0;
+        tlbrentry <= 32'b0;
+        dmw0   <= 32'b0;
+        dmw1   <= 32'b0;
         stable_counter <= 64'b0;
         timer_pending  <= 1'b0;
     end
@@ -210,13 +303,18 @@ always @(posedge clk) begin
         // ====================================================
         if (csr_inst_we) begin
             case (csr_num)
-                CSR_CRMD:   crmd   <= crmd_wdata;
+                CSR_CRMD:   crmd   <= crmd_wdata & 32'h000001ff;
                 CSR_PRMD:   prmd   <= prmd_wdata;
                 CSR_ECFG:   ecfg   <= ecfg_legal_wdata;
                 CSR_ESTAT:  estat[1:0] <= (estat[1:0] & ~csr_wmask[1:0]) | (csr_wvalue[1:0] & csr_wmask[1:0]);
                 CSR_ERA:    era    <= era_wdata;
                 CSR_BADV:   badv   <= badv_wdata;
                 CSR_EENTRY: eentry <= eentry_wdata;
+                CSR_TLBIDX: tlbidx <= tlbidx_wdata & 32'hbf00000f;
+                CSR_TLBEHI: tlbehi <= tlbehi_wdata & 32'hffffe000;
+                CSR_TLBELO0:tlbelo0 <= tlbelo0_wdata & 32'h0fffffff;
+                CSR_TLBELO1:tlbelo1 <= tlbelo1_wdata & 32'h0fffffff;
+                CSR_ASID:   asid <= asid_wdata[9:0];
                 CSR_SAVE0:  save0  <= save0_wdata;
                 CSR_SAVE1:  save1  <= save1_wdata;
                 CSR_SAVE2:  save2  <= save2_wdata;
@@ -235,8 +333,37 @@ always @(posedge clk) begin
                     end
                 end
                 CSR_TICLR:  ; // write-only, handled above via timer_pending clear
+                CSR_TLBRENTRY: tlbrentry <= tlbrentry_wdata;
+                CSR_DMW0:   dmw0 <= dmw0_wdata & 32'hee000039;
+                CSR_DMW1:   dmw1 <= dmw1_wdata & 32'hee000039;
                 default: ;
             endcase
+        end
+
+        if (tlbsrch_en) begin
+            if (tlbsrch_found) begin
+                tlbidx <= {28'b0, tlbsrch_index};
+            end
+            else begin
+                tlbidx <= 32'h80000000;
+            end
+        end
+
+        if (tlbrd_en) begin
+            if (tlbrd_e) begin
+                tlbidx  <= {2'b0, tlbrd_ps, 20'b0, tlbidx[3:0]};
+                tlbehi  <= {tlbrd_vppn, 13'b0};
+                tlbelo0 <= {4'b0, tlbrd_ppn0, 1'b0, tlbrd_g, tlbrd_mat0, tlbrd_plv0, tlbrd_d0, tlbrd_v0};
+                tlbelo1 <= {4'b0, tlbrd_ppn1, 1'b0, tlbrd_g, tlbrd_mat1, tlbrd_plv1, tlbrd_d1, tlbrd_v1};
+                asid    <= tlbrd_asid;
+            end
+            else begin
+                tlbidx  <= 32'h80000000 | {28'b0, tlbidx[3:0]};
+                tlbehi  <= 32'b0;
+                tlbelo0 <= 32'b0;
+                tlbelo1 <= 32'b0;
+                asid    <= 10'b0;
+            end
         end
 
         // ====================================================
@@ -257,11 +384,18 @@ always @(posedge clk) begin
             prmd[2]   <= crmd[2];
             crmd[1:0] <= 2'b00;
             crmd[2]   <= 1'b0;
+            if (wb_ecode == `ECODE_TLBR) begin
+                crmd[3] <= 1'b1;
+                crmd[4] <= 1'b0;
+            end
             era       <= wb_pc;
             estat[21:16] <= wb_ecode;
             estat[30:22] <= wb_esubcode;
-            if (wb_ecode == 6'h08 || wb_ecode == 6'h09) begin
+            if (wb_ecode == `ECODE_ADEF || wb_ecode == `ECODE_ALE || wb_tlb_ex) begin
                 badv <= wb_badv;
+            end
+            if (wb_tlb_ex) begin
+                tlbehi <= {wb_badv[31:13], 13'b0};
             end
         end
 
@@ -271,6 +405,10 @@ always @(posedge clk) begin
         if (ertn_flush) begin
             crmd[1:0] <= prmd[1:0];
             crmd[2]   <= prmd[2];
+            if (estat[21:16] == `ECODE_TLBR) begin
+                crmd[3] <= 1'b0;
+                crmd[4] <= 1'b1;
+            end
         end
 
         // ====================================================

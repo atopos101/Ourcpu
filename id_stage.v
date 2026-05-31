@@ -40,7 +40,9 @@ wire [31:0] br_target;
 
 wire [31:0] ds_pc;
 wire [31:0] ds_inst;
-wire        fs_ex;        // ADEF from IF stage
+wire        fs_ex;        // fetch exception from IF stage
+wire [ 5:0] fs_ecode;
+wire [ 8:0] fs_esubcode;
 
 reg         ds_valid   ;
 wire        ds_ready_go;
@@ -281,9 +283,34 @@ assign csr_op = inst_csrrd   ? 2'b01 :
 wire inst_syscall;
 assign inst_syscall = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h16];
 
-// ERTN: op_31_26=1, op_25_22=9, op_21_20=0, op_19_15=0x10
+// ERTN / TLB: op_31_26=1, op_25_22=9, op_21_20=0.
 wire inst_ertn;
-assign inst_ertn    = op_31_26_d[6'h01] & op_25_22_d[4'h9] & op_21_20_d[2'h0] & op_19_15_d[5'h10];
+wire inst_tlb_base;
+wire inst_tlbsrch;
+wire inst_tlbrd;
+wire inst_tlbwr;
+wire inst_tlbfill;
+wire inst_invtlb_base;
+wire inst_invtlb;
+wire [2:0] tlb_op;
+wire [4:0] invtlb_op;
+
+assign inst_tlb_base = op_31_26_d[6'h01] & op_25_22_d[4'h9] & op_21_20_d[2'h0];
+assign inst_tlbsrch  = inst_tlb_base & op_19_15_d[5'h10] & (ds_inst[14:10] == 5'h0a) & (rj == 5'b0) & (rd == 5'b0);
+assign inst_tlbrd    = inst_tlb_base & op_19_15_d[5'h10] & (ds_inst[14:10] == 5'h0b) & (rj == 5'b0) & (rd == 5'b0);
+assign inst_tlbwr    = inst_tlb_base & op_19_15_d[5'h10] & (ds_inst[14:10] == 5'h0c) & (rj == 5'b0) & (rd == 5'b0);
+assign inst_tlbfill  = inst_tlb_base & op_19_15_d[5'h10] & (ds_inst[14:10] == 5'h0d) & (rj == 5'b0) & (rd == 5'b0);
+assign inst_ertn     = inst_tlb_base & op_19_15_d[5'h10] & (ds_inst[14:10] == 5'h0e) & (rj == 5'b0) & (rd == 5'b0);
+
+assign inst_invtlb_base = inst_tlb_base & op_19_15_d[5'h13];
+assign inst_invtlb      = inst_invtlb_base & (rd <= 5'd6);
+assign invtlb_op        = rd;
+
+assign tlb_op = inst_tlbsrch ? 3'd1 :
+                inst_tlbrd   ? 3'd2 :
+                inst_tlbwr   ? 3'd3 :
+                inst_tlbfill ? 3'd4 :
+                inst_invtlb  ? 3'd5 : 3'd0;
 
 // BREAK: op_31_26=0, op_25_22=0, op_21_20=2, op_19_15=0x14
 wire inst_break;
@@ -329,7 +356,8 @@ assign inst_valid = inst_add_w | inst_sub_w | inst_slt | inst_sltu |
                     inst_mod_w | inst_div_wu | inst_mod_wu |
                     inst_csrrd | inst_csrwr | inst_csrxchg |
                     inst_syscall | inst_ertn | inst_break |
-                    inst_rdcntvl_w | inst_rdcntvh_w | inst_rdcntid;
+                    inst_rdcntvl_w | inst_rdcntvh_w | inst_rdcntid |
+                    inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill | inst_invtlb;
 
 // ============================================================
 // Common decode helpers
@@ -406,7 +434,8 @@ assign dst_is_r1     = inst_bl;
 
 // gr_we: rdcntv and rdcntid write GR; break/syscall/ertn do not
 assign gr_we = inst_rdcntv | inst_rdcntid |
-               (~store_op & ~branch_op & ~inst_b & ~inst_syscall & ~inst_ertn & ~inst_break);
+               (~store_op & ~branch_op & ~inst_b & ~inst_syscall & ~inst_ertn & ~inst_break
+                & ~inst_tlbsrch & ~inst_tlbrd & ~inst_tlbwr & ~inst_tlbfill & ~inst_invtlb_base);
 assign mem_we = store_op;
 
 assign dest  = dst_is_r1    ? 5'd1 :
@@ -456,19 +485,22 @@ assign br_taken = (   inst_beq  &&  rj_eq_rd
                    || inst_b
                   )  && ds_valid && ~load_stall && (fs_ex !== 1'b1);
 
-assign inst_no_dest = store_op | inst_b | branch_op;
+assign inst_no_dest = store_op | inst_b | branch_op | inst_tlbsrch | inst_tlbrd
+                      | inst_tlbwr | inst_tlbfill | inst_invtlb_base;
 
 // ============================================================
 // Hazard detection
 // ============================================================
 assign src_no_rj = inst_b | inst_bl | inst_lu12i_w | inst_pcaddu12i
                    | inst_csrrd | inst_csrwr | inst_syscall | inst_ertn
-                   | inst_rdcntv | inst_rdcntid;
+                   | inst_rdcntv | inst_rdcntid
+                   | inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill;
 assign src_no_rk = inst_slli_w | inst_srli_w | inst_srai_w | inst_addi_w | load_op | store_op
                    | inst_jirl | inst_b | inst_bl | branch_op | inst_lu12i_w | inst_pcaddu12i
                    | inst_slti | inst_sltui | inst_andi | inst_ori | inst_xori
                    | inst_csrrd | inst_csrwr | inst_csrxchg | inst_syscall | inst_ertn
-                   | inst_rdcntv | inst_rdcntid;
+                   | inst_rdcntv | inst_rdcntid
+                   | inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill;
 assign src_no_rd = ~store_op & ~branch_op & ~inst_csrwr & ~inst_csrxchg;
 
 assign rj_wait = ~src_no_rj && (rj != 5'b00000)
@@ -541,12 +573,12 @@ wire inst_ine = ds_valid && (fs_ex !== 1'b1) && ~inst_valid;
 wire ds_ex = (fs_ex || inst_break || inst_ine) && ds_valid;
 
 wire [5:0] ds_ecode =
-    fs_ex      ? `ECODE_ADEF :
+    fs_ex      ? fs_ecode :
     inst_break ? `ECODE_BRK :
     inst_ine   ? `ECODE_INE :
     6'h00;
 
-wire [8:0] ds_esubcode = 9'h000;
+wire [8:0] ds_esubcode = fs_ex ? fs_esubcode : 9'h000;
 
 // ============================================================
 // FS -> DS bus register
@@ -555,7 +587,9 @@ reg  [`FS_TO_DS_BUS_WD -1:0] fs_to_ds_bus_r;
 
 assign {ds_inst,
         ds_pc,
-        fs_ex} = fs_to_ds_bus_r;
+        fs_ex,
+        fs_ecode,
+        fs_esubcode} = fs_to_ds_bus_r;
 
 // ============================================================
 // Write-back bus unpack
@@ -568,34 +602,37 @@ assign {rf_we   ,  //37:37
 // ============================================================
 // DS -> ES bus
 // Format: {ds_ex, ds_ecode, ds_esubcode, rdcntv, rdcntvh, rdcntid,
+//           tlb_op, invtlb_op,
 //           original 180-bit fields}
 // ============================================================
-assign ds_to_es_bus = {ds_ex,           // 1  (198)
-                       ds_ecode,        // 6  (197:192)
-                       ds_esubcode,     // 9  (191:183)
-                       inst_rdcntv,     // 1  (182)
-                       inst_rdcntvh_w,  // 1  (181)
-                       inst_rdcntid,    // 1  (180)
+assign ds_to_es_bus = {ds_ex,
+                       ds_ecode,
+                       ds_esubcode,
+                       inst_rdcntv,
+                       inst_rdcntvh_w,
+                       inst_rdcntid,
+                       tlb_op,
+                       invtlb_op,
                        // original 180-bit payload
-                       alu_op       ,   // 19 (179:161)
-                       load_op      ,   // 1  (160)
-                       mem_size     ,   // 2  (159:158)
-                       mem_unsigned ,   // 1  (157)
-                       src1_is_pc   ,   // 1  (156)
-                       src2_is_imm  ,   // 1  (155)
-                       src2_is_4    ,   // 1  (154)
-                       gr_we        ,   // 1  (153)
-                       mem_we       ,   // 1  (152)
-                       dest         ,   // 5  (151:147)
-                       imm          ,   // 32 (146:115)
-                       rj_value     ,   // 32 (114:83)
-                       rkd_value    ,   // 32 (82:51)
-                       ds_pc        ,   // 32 (50:19)
-                       res_from_mem ,   // 1  (18)
-                       csr_op       ,   // 2  (17:16)
-                       csr_num      ,   // 14 (15:2)
-                       inst_syscall ,   // 1  (1)
-                       inst_ertn       // 1  (0)
+                       alu_op       ,
+                       load_op      ,
+                       mem_size     ,
+                       mem_unsigned ,
+                       src1_is_pc   ,
+                       src2_is_imm  ,
+                       src2_is_4    ,
+                       gr_we        ,
+                       mem_we       ,
+                       dest         ,
+                       imm          ,
+                       rj_value     ,
+                       rkd_value    ,
+                       ds_pc        ,
+                       res_from_mem ,
+                       csr_op       ,
+                       csr_num      ,
+                       inst_syscall ,
+                       inst_ertn
                       };
 
 // ============================================================
