@@ -1,110 +1,6 @@
 # Ourcpu LoongArch 五级流水 AXI CPU
 
-本仓库保存的是一套面向《CPU 设计实战 LoongArch 版》实验环境的 32 位 LoongArch 风格五级流水 CPU。当前版本已经从早期的基础整数指令、CSR、异常、中断和 AXI 总线实验，推进到 exp19，对 TLB、虚实地址转换、TLB 相关异常和 DMW 直接映射窗口完成了集成。
-
-当前代码已在 Vivado 2019.2 下通过 exp19 的 AXI SoC 功能仿真、综合、实现、bitstream 生成和上板验证。验证代码、testbench、func 程序和官方 SoC 框架没有作为通过测试的手段被修改，主要改动集中在 CPU 实现文件。
-
-## 当前状态
-
-最后一次完整验证状态如下：
-
-```text
-实验目标: exp19
-验证环境: output/exp19/soc_verify/soc_axi
-Vivado 版本: 2019.2
-仿真结果: PASS
-最终功能点: Number 8'd72 Functional Test Point PASS!!!
-实现结果: write_bitstream Complete
-时序结果: WNS = 0.164 ns, TNS = 0.000 ns, WHS = 0.088 ns
-bit 文件: output/exp19/soc_verify/soc_axi/run_vivado/project/loongson.runs/impl_1/soc_lite_top.bit
-```
-
-上板验证时，测试程序正常运行后，数码管会从 `01000001` 逐步递增，最终停在：
-
-```text
-48000048
-```
-
-含义如下：
-
-```text
-高 8 位 0x48: 当前功能测试点编号 72
-低 8 位 0x48: 已通过功能测试点数量 72
-```
-
-## 当前工作内容概览
-
-本阶段完成的核心工作可以概括为四部分：
-
-1. 完成 exp18 的 TLB 指令和 TLB CSR 支持。
-2. 完成 exp19 的 TLB 异常、DMW CSR 和虚实地址映射。
-3. 修复 AXI SoC 环境下的取指响应和 PC 绑定问题。
-4. 优化除法器、冒险处理和 SRAM-to-AXI bridge，使设计能够通过实现时序并上板运行。
-
-已经支持的 exp18/exp19 关键内容：
-
-```text
-TLB 指令:
-tlbsrch, tlbrd, tlbwr, tlbfill, invtlb
-
-TLB/DMW CSR:
-TLBIDX, TLBEHI, TLBELO0, TLBELO1, ASID, TLBRENTRY, DMW0, DMW1
-
-TLB/MMU 异常:
-TLBR, PIL, PIS, PIF, PME, PPI
-
-地址映射:
-直接地址模式, DMW 直接映射窗口, TLB 页表映射
-```
-
-## 目录和文件
-
-根目录下的 Verilog 文件是当前 CPU 的主实现：
-
-```text
-alu.v
-csr_regfile.v
-decoder_2_4.v
-decoder_4_16.v
-decoder_5_32.v
-decoder_6_64.v
-exe_stage.v
-id_stage.v
-if_stage.v
-mem_stage.v
-mycpu.vh
-mycpu_top.v
-regfile.v
-tlb.v
-wb_stage.v
-```
-
-exp19 工程实际引用的 CPU 副本位于：
-
-```text
-output/exp19/myCPU
-```
-
-当前调试习惯是：
-
-```text
-根目录 CPU 源码作为主版本
-output/exp19/myCPU 作为 exp19 Vivado 工程引用副本
-```
-
-exp19 AXI SoC 验证工程入口：
-
-```text
-output/exp19/soc_verify/soc_axi/run_vivado/project/loongson.xpr
-```
-
-已生成的上板 bit 文件：
-
-```text
-output/exp19/soc_verify/soc_axi/run_vivado/project/loongson.runs/impl_1/soc_lite_top.bit
-```
-
-已经清理掉 Vivado 运行日志、`.Xil`、`*.cache`、`*.sim` 等临时文件。重新打开工程或重新运行仿真/实现时，Vivado 会自动再生成这些文件。
+本仓库保存的是一套 32 位 LoongArch 风格五级流水 CPU，支持 TLB、虚实地址转换、TLB 异常、DMW 直接映射窗口、指令 Cache 和数据 Cache，对外提供 AXI 主接口。
 
 ## 总体架构
 
@@ -143,12 +39,16 @@ flowchart LR
             ID --> IF
         end
 
+        ICache["ICache\n2 路组相联/整行回填"]
+        DCache["DCache\n写回/脏行驱逐"]
         Bridge["sram_axi_bridge_2x1"]
     end
 
-    IF -- "inst_sram req" --> Bridge
-    EXE -- "data_sram req" --> Bridge
-    Bridge -- "AXI" --> SOC["soc_axi 环境"]
+    IF -- "inst_sram req" --> ICache
+    ICache -- "AXI burst refill" --> Bridge
+    EXE -- "data_sram req" --> DCache
+    DCache -- "AXI burst" --> Bridge
+    Bridge -- "AXI" --> SOC["外部 AXI 总线"]
     WB -- "debug_wb_*" --> TRACE["trace 比对"]
 ```
 
@@ -158,19 +58,19 @@ flowchart LR
 
 CPU 顶层，连接五级流水、AXI 桥接、debug trace 和外部中断输入。
 
-当前重点：
+关键功能：
 
 - 对外提供 AXI 主接口。
 - 内部保留类 SRAM 风格的取指和访存请求。
-- 使用 `sram_axi_bridge_2x1` 把内部 SRAM 风格请求转换为 AXI 事务。
-- 通过请求寄存化切断 EXE 访存地址到官方 AXI RAM/IP 的关键路径。
+- 在取指通路中实例化 ICache，在访存通路中实例化 DCache。
+- 使用 `sram_axi_bridge_2x1` 把 Cache 回填请求和数据 SRAM 请求转换为 AXI 事务。
 - 保留功能测试需要的 `debug_wb_pc`、`debug_wb_rf_we`、`debug_wb_rf_wnum`、`debug_wb_rf_wdata`。
 
 ### `if_stage.v`
 
 取指阶段。
 
-当前重点：
+关键功能：
 
 - 维护 PC。
 - 发起取指请求。
@@ -180,11 +80,35 @@ CPU 顶层，连接五级流水、AXI 桥接、debug trace 和外部中断输入
 - 使用 `req_cancel` 处理请求期间发生的重定向，避免旧响应进入后续流水级。
 - 接收 EXE 阶段给出的取指物理地址和取指 TLB 异常。
 
+### `icache.v`
+
+指令 Cache 模块。
+
+关键功能：
+
+- 2 路组相联，256 组，每行 16 Byte。
+- 每个 Cache 行包含 4 个 32 位 bank。
+- 使用 LRU 选择替换路。
+- 通过 `addr_ok/data_ok` 与 IF 阶段握手。
+- miss 时通过 `rd_req/rd_rdy` 发起整行读请求。
+- 使用 `ret_valid/ret_last` 接收 4 拍 burst 回填数据。
+- 文件内包含可综合的同步 RAM 模块 `ram_256x21` 和 `ram_256x32`。
+
+### `dcache.v`
+
+数据 Cache 模块。
+
+关键功能：
+
+- 写回策略，支持脏行驱逐。
+- 通过 AXI burst 通路写回脏数据。
+- 与 EXE 阶段的数据 SRAM 接口交互。
+
 ### `id_stage.v`
 
 译码阶段。
 
-当前重点：
+关键功能：
 
 - 基础指令译码。
 - CSR 指令译码。
@@ -198,7 +122,7 @@ CPU 顶层，连接五级流水、AXI 桥接、debug trace 和外部中断输入
 
 执行阶段，是当前版本中最关键、最复杂的模块。
 
-当前重点：
+关键功能：
 
 - 执行 ALU 运算。
 - 控制迭代除法器。
@@ -216,7 +140,7 @@ CPU 顶层，连接五级流水、AXI 桥接、debug trace 和外部中断输入
 
 访存后处理阶段。
 
-当前重点：
+关键功能：
 
 - 等待 load 返回数据。
 - 根据 `mem_size` 选择 byte/halfword/word。
@@ -228,7 +152,7 @@ CPU 顶层，连接五级流水、AXI 桥接、debug trace 和外部中断输入
 
 写回阶段。
 
-当前重点：
+关键功能：
 
 - 写回通用寄存器。
 - 输出 debug trace。
@@ -238,7 +162,7 @@ CPU 顶层，连接五级流水、AXI 桥接、debug trace 和外部中断输入
 
 CSR 寄存器堆。
 
-当前重点：
+关键功能：
 
 - 基础异常 CSR。
 - 中断和定时器 CSR。
@@ -252,7 +176,7 @@ CSR 寄存器堆。
 
 独立 TLB 模块。
 
-当前重点：
+关键功能：
 
 - 16 项全相联 TLB。
 - 双查询端口。
@@ -266,7 +190,7 @@ CSR 寄存器堆。
 
 算术逻辑单元。
 
-当前重点：
+关键功能：
 
 - 普通 ALU 操作仍为组合逻辑。
 - 乘法相关操作保留组合结果选择。
@@ -276,7 +200,7 @@ CSR 寄存器堆。
 
 全局宏定义。
 
-当前重点：
+关键功能：
 
 - 流水总线宽度。
 - 异常码。
@@ -311,7 +235,7 @@ CSR 寄存器堆。
 
 ### TLB 指令
 
-exp18/exp19 相关 TLB 指令：
+支持以下 TLB 指令：
 
 - `tlbsrch`
 - `tlbrd`
@@ -320,6 +244,14 @@ exp18/exp19 相关 TLB 指令：
 - `invtlb`
 
 TLB 指令的状态修改都由 EXE 阶段在提交点统一控制。如果指令被异常、`ertn` 或 flush 冲刷，不会错误修改 TLB 或 CSR。
+
+### Cache 操作指令
+
+支持 `cacop` 指令的 op0、op1、op2 操作：
+
+- op0：对 ICache 操作（按索引）。
+- op1：对 DCache 操作（按索引）。
+- op2：带地址翻译的 Cache 操作，按需产生 TLBR、PIL、PPI 异常。
 
 ## CSR 实现
 
@@ -441,7 +373,7 @@ TLB 物理地址拼接：
 - `BRK`: `break`。
 - `INE`: 指令不存在。
 
-exp19 新增或完善的 TLB/MMU 异常：
+支持的 TLB/MMU 异常：
 
 - `TLBR`: TLB refill，TLB 重填例外。
 - `PIF`: 取指页无效例外。
@@ -506,11 +438,9 @@ ID 阶段负责主要冒险检测：
 EXE 结果 -> ID 分支判断 -> IF 取指请求
 ```
 
-这是当前版本通过 Vivado routed timing 的重要改动之一。
-
 ## 除法器和时序优化
 
-原先如果直接使用 Verilog 的 `/` 和 `%` 组合除法，Vivado 实现中会形成非常长的关键路径。
+原先如果直接使用 Verilog 的 `/` 和 `%` 组合除法，实现中会形成非常长的关键路径。
 
 当前 `alu.v` 中新增 `iter_divider`：
 
@@ -520,9 +450,7 @@ EXE 结果 -> ID 分支判断 -> IF 取指请求
 - EXE 阶段遇到 `div.w/div.wu/mod.w/mod.wu` 时暂停流水。
 - flush 或 `ertn` 时取消当前除法状态。
 
-这项修改解决了组合除法导致的 timing failed 问题。
-
-## AXI 相关修复
+## AXI 相关设计
 
 ### IF 请求 PC 稳定化
 
@@ -552,214 +480,60 @@ req_cancel
 EXE 访存地址计算 -> AXI RAM/IP 输入
 ```
 
-从而让设计能够在当前约束下通过实现时序。
+从而让设计能够满足实现时序。
 
-## Vivado 仿真和实现
+### Cache burst 传输
 
-### 打开工程
-
-Vivado 工程路径：
+指令 Cache 行大小为 16 Byte，每行包含 4 个 32 位字。AXI bridge 对 ICache 回填请求生成：
 
 ```text
-output/exp19/soc_verify/soc_axi/run_vivado/project/loongson.xpr
+ARLEN   = 3
+ARSIZE  = 2
+ARBURST = INCR
 ```
 
-如果工程目录被删除，可以在下面目录重新执行 `create_project.tcl`：
+读响应阶段会保持到 `RLAST` 到达，并将每拍 `RDATA` 依次送入 ICache 的 `ret_valid/ret_last/ret_data` 接口。数据访存通路仍保留原有单拍 AXI 读写行为。
+
+DCache 脏行通过 AXI burst 通路写回。
+
+## 目录和文件
+
+根目录下的 Verilog 文件是当前 CPU 的主实现：
 
 ```text
-output/exp19/soc_verify/soc_axi/run_vivado
+alu.v
+icache.v
+dcache.v
+csr_regfile.v
+decoder_2_4.v
+decoder_4_16.v
+decoder_5_32.v
+decoder_6_64.v
+exe_stage.v
+id_stage.v
+if_stage.v
+mem_stage.v
+mycpu.vh
+mycpu_top.v
+regfile.v
+tlb.v
+wb_stage.v
 ```
 
-工程会引用：
+## 全局宏定义（`mycpu.vh`）
 
-```text
-output/exp19/myCPU
-```
+`mycpu.vh` 定义了流水线数据通路宽度、异常编码和中断位编号，被各模块通过 `include` 引用。主要常量包括：
 
-### 功能仿真
+- 流水总线相关：ALU 结果、访存地址、写回数据等信号的位宽定义。
+- 异常码：`ADEF`、`ALE`、`SYS`、`BRK`、`INE`、`TLBR`、`PIF`、`PIL`、`PIS`、`PME`、`PPI`、`INT`。
+- 中断位编号：`int_hw_pin`、`int_timer`、`int_ipi`。
 
-仿真顶层：
+## 设计要点
 
-```text
-tb_top
-```
+### CSR/TLB 副作用只在提交点发生
 
-进入仿真界面后直接 `run all`。通过标志：
+TLB 指令和 CSR 写指令的状态修改都由 EXE 阶段在提交点统一控制。如果指令被异常、`ertn` 或 flush 冲刷，不会错误修改 TLB 或 CSR。这是保证正确性的关键设计。
 
-```text
-Number 8'd72 Functional Test Point PASS!!!
-Test end!
-----PASS!!!
-```
+### Cache 一致性
 
-### 综合实现
-
-综合/实现顶层：
-
-```text
-soc_lite_top
-```
-
-最后一次实现结果：
-
-```text
-write_bitstream Complete
-0 Critical Warnings
-0 Errors
-WNS = 0.164 ns
-TNS = 0.000 ns
-WHS = 0.088 ns
-```
-
-## 上板验证
-
-### 烧录
-
-1. 打开 Vivado 2019.2。
-2. 打开工程：
-
-```text
-output/exp19/soc_verify/soc_axi/run_vivado/project/loongson.xpr
-```
-
-3. 进入 `Open Hardware Manager`。
-4. 选择 `Open Target -> Auto Connect`。
-5. 右键 FPGA 设备，选择 `Program Device`。
-6. bit 文件选择：
-
-```text
-output/exp19/soc_verify/soc_axi/run_vivado/project/loongson.runs/impl_1/soc_lite_top.bit
-```
-
-`.ltx` 文件可以不填。
-
-### 拨码开关
-
-exp19 测试程序读取 `switch[7:0]` 决定每个功能点之间的等待时间。最快配置是：
-
-```text
-switch[7:0] = 8'hff
-```
-
-当前板子上红色 LED 是低电平点亮，因此实际观察关系是：
-
-```text
-红色 LED 暗 -> CPU 读到 switch = 1
-红色 LED 亮 -> CPU 读到 switch = 0
-```
-
-所以上板验证时，应把 8 个拨码调到让对应红色 LED 都暗的状态。此时测试运行最快。
-
-### 正常现象
-
-烧录完成或复位松开后，CPU 会自动运行测试。数码管应逐步显示：
-
-```text
-01000001
-02000002
-03000003
-...
-48000048
-```
-
-最终停在：
-
-```text
-48000048
-```
-
-如果停在中间值很久，优先检查拨码是否让 CPU 实际读到了 `8'hff`。拨码方向错误通常不会导致立即失败，但会让每个测试点之间的等待明显变长。
-
-## 清理后的工程状态
-
-为了避免仓库里堆积 Vivado 运行垃圾，已经清理了以下临时内容：
-
-```text
-*.log
-*.jou
-*.str
-*.tmp
-*.bak
-*.backup
-.Xil
-*.cache
-*.sim
-```
-
-保留的关键内容：
-
-- CPU 源码。
-- exp19 的 `myCPU` 副本。
-- func/testbench/SoC 验证代码。
-- Vivado 工程入口 `loongson.xpr`。
-- routed reports、DCP 和 bitstream 等有效实现产物。
-- 官方 Xilinx IP 相关文件。
-
-重新打开 Vivado 工程、重新仿真或重新实现时，Vivado 会重新生成日志和缓存目录。
-
-## 重要调试记录
-
-### 不修改原始检验代码
-
-调试 exp18/exp19 时，功能通过依赖 CPU 本身修改，而不是修改 testbench 或 func 测试程序。CPU 代码同步到：
-
-```text
-output/exp19/myCPU
-```
-
-再由 Vivado 工程引用。
-
-### 官方 AXI RAM/IP 优先
-
-曾经为调试考虑过自定义 AXI RAM。若自定义 AXI RAM 和官方测试环境冲突，应删除或断开自定义 RAM，使用官方 SoC 验证环境中的：
-
-```text
-output/exp19/soc_verify/soc_axi/rtl/xilinx_ip/axi_ram
-```
-
-当前通过版本使用官方 AXI RAM/IP。
-
-### 功能点 47 附近的 IF/AXI 问题
-
-exp19 曾暴露出旧取指响应绑定新 PC 的问题，表现为官方 AXI Crossbar 下 trace 在中后段失败。通过在 IF 阶段保存请求 PC 并取消无效响应后解决。
-
-### 组合除法 timing failed
-
-组合除法和取模会导致实现时序严重失败。改为 `iter_divider` 后，功能仿真仍通过，实现时序满足。
-
-### AXI bridge 关键路径
-
-EXE 地址计算直接连到 AXI RAM/IP 输入会形成关键路径。bridge 寄存请求后，最终 routed timing 满足约束。
-
-## 后续开发建议
-
-继续做 exp20 之后的 cache、`cacop`、原子指令或性能优化时，建议注意：
-
-- 保持 CSR/TLB 副作用只在提交点发生。
-- 修改 IF 逻辑时不要破坏 `req_pc` 和响应绑定。
-- 修改 AXI bridge 时重新跑随机延迟仿真和 exp19 功能仿真。
-- 如果恢复 EXE 前递，需要重新检查分支相关路径和 routed timing。
-- 如果引入 cache，需要重新梳理异常冲刷、地址转换、`cacop`、AXI 返回顺序和一致性行为。
-
-## 快速检查清单
-
-每次改动 CPU 后，建议按以下顺序检查：
-
-```text
-1. 修改根目录 CPU 源码
-2. 同步到 output/exp19/myCPU
-3. 打开或重建 exp19 Vivado 工程
-4. 运行 AXI SoC 功能仿真
-5. 确认输出 ----PASS!!!
-6. Run Synthesis
-7. Run Implementation
-8. Generate Bitstream
-9. 检查 timing summary
-10. 上板烧录 soc_lite_top.bit
-11. 拨码调到红色 LED 全暗
-12. 复位并观察数码管最终停在 48000048
-```
-
-## 许可说明
-
-当前目录未包含 `LICENSE` 文件。若需要公开发布，建议补充许可证声明。
+数据访存使用 DCache，ICache 和 DCache 分别通过 AXI bridge 与外部交互。bridge 在 IDLE 状态下优先接受数据 SRAM 请求，其次接受 ICache 回填请求，保证两类事务不会在 AXI 读通道上交叉。
