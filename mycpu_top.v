@@ -1,51 +1,59 @@
 `include "mycpu.vh"
 
 module mycpu_top(
-    input         aclk,
-    input         aresetn,
+    input           aclk,
+    input           aresetn,
+    input    [ 7:0] intrpt,
 
-    output [ 3:0] arid,
-    output [31:0] araddr,
-    output [ 7:0] arlen,
-    output [ 2:0] arsize,
-    output [ 1:0] arburst,
-    output [ 1:0] arlock,
-    output [ 3:0] arcache,
-    output [ 2:0] arprot,
-    output        arvalid,
-    input         arready,
-    input  [ 3:0] rid,
-    input  [31:0] rdata,
-    input  [ 1:0] rresp,
-    input         rlast,
-    input         rvalid,
-    output        rready,
+    output   [ 3:0] arid,
+    output   [31:0] araddr,
+    output   [ 7:0] arlen,
+    output   [ 2:0] arsize,
+    output   [ 1:0] arburst,
+    output   [ 1:0] arlock,
+    output   [ 3:0] arcache,
+    output   [ 2:0] arprot,
+    output          arvalid,
+    input           arready,
+    input    [ 3:0] rid,
+    input    [31:0] rdata,
+    input    [ 1:0] rresp,
+    input           rlast,
+    input           rvalid,
+    output          rready,
 
-    output [ 3:0] awid,
-    output [31:0] awaddr,
-    output [ 7:0] awlen,
-    output [ 2:0] awsize,
-    output [ 1:0] awburst,
-    output [ 1:0] awlock,
-    output [ 3:0] awcache,
-    output [ 2:0] awprot,
-    output        awvalid,
-    input         awready,
-    output [ 3:0] wid,
-    output [31:0] wdata,
-    output [ 3:0] wstrb,
-    output        wlast,
-    output        wvalid,
-    input         wready,
-    input  [ 3:0] bid,
-    input  [ 1:0] bresp,
-    input         bvalid,
-    output        bready,
+    output   [ 3:0] awid,
+    output   [31:0] awaddr,
+    output   [ 7:0] awlen,
+    output   [ 2:0] awsize,
+    output   [ 1:0] awburst,
+    output   [ 1:0] awlock,
+    output   [ 3:0] awcache,
+    output   [ 2:0] awprot,
+    output          awvalid,
+    input           awready,
+    output   [ 3:0] wid,
+    output   [31:0] wdata,
+    output   [ 3:0] wstrb,
+    output          wlast,
+    output          wvalid,
+    input           wready,
+    input    [ 3:0] bid,
+    input    [ 1:0] bresp,
+    input           bvalid,
+    output          bready,
 
-    output [31:0] debug_wb_pc,
-    output [ 3:0] debug_wb_rf_we,
-    output [ 4:0] debug_wb_rf_wnum,
-    output [31:0] debug_wb_rf_wdata
+    output [31:0] debug0_wb_pc,
+    output [ 3:0] debug0_wb_rf_wen,
+    output [ 4:0] debug0_wb_rf_wnum,
+    output [31:0] debug0_wb_rf_wdata
+`ifdef CPU_2CMT
+    ,
+    output [31:0] debug1_wb_pc,
+    output [ 3:0] debug1_wb_rf_wen,
+    output [ 4:0] debug1_wb_rf_wnum,
+    output [31:0] debug1_wb_rf_wdata
+`endif
 );
 
 wire        core_inst_req;
@@ -117,7 +125,7 @@ wire [31:0] uncache_rdata;
 mycpu_core u_core(
     .clk                (aclk                ),
     .resetn             (aresetn             ),
-    .hw_int_in          (8'b0                ),
+    .hw_int_in          (intrpt              ),
     .inst_sram_req      (core_inst_req       ),
     .inst_sram_wr       (core_inst_wr        ),
     .inst_sram_size     (core_inst_size      ),
@@ -144,11 +152,18 @@ mycpu_core u_core(
     .cacop_way          (core_cacop_way      ),
     .cacop_tag          (core_cacop_tag      ),
     .cacop_ok           (core_cacop_ok       ),
-    .debug_wb_pc        (debug_wb_pc         ),
-    .debug_wb_rf_we     (debug_wb_rf_we      ),
-    .debug_wb_rf_wnum   (debug_wb_rf_wnum    ),
-    .debug_wb_rf_wdata  (debug_wb_rf_wdata   )
+    .debug_wb_pc        (debug0_wb_pc        ),
+    .debug_wb_rf_we     (debug0_wb_rf_wen    ),
+    .debug_wb_rf_wnum   (debug0_wb_rf_wnum   ),
+    .debug_wb_rf_wdata  (debug0_wb_rf_wdata  )
 );
+
+`ifdef CPU_2CMT
+assign debug1_wb_pc       = 32'b0;
+assign debug1_wb_rf_wen   = 4'b0;
+assign debug1_wb_rf_wnum  = 5'b0;
+assign debug1_wb_rf_wdata = 32'b0;
+`endif
 
 assign core_data_addr_ok = core_data_uncached ? uncache_addr_ok : dcache_addr_ok;
 assign core_data_data_ok = uncache_data_ok || dcache_data_ok;
