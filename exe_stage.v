@@ -19,9 +19,18 @@ module exe_stage(
     output [ 3:0] data_sram_wstrb  ,
     output [31:0] data_sram_addr   ,
     output [31:0] data_sram_wdata  ,
+    output        data_sram_uncached,
     input         data_sram_addr_ok,
     input         data_sram_data_ok,
     input  [31:0] data_sram_rdata  ,
+    // cache maintenance interface
+    output        cacop_valid,
+    output        cacop_is_dcache,
+    output [ 1:0] cacop_op,
+    output [ 7:0] cacop_index,
+    output        cacop_way,
+    output [19:0] cacop_tag,
+    input         cacop_ok,
     // forward to id
     output [4:0] es_to_ds_dest,
     output es_to_ds_load_op,
@@ -52,7 +61,7 @@ wire        es_ready_go   ;
 reg  [`DS_TO_ES_BUS_WD -1:0] ds_to_es_bus_r;
 
 // ============================================================
-// Unpack ds_to_es_bus (207 bits)
+// Unpack ds_to_es_bus
 // ============================================================
 wire        ds_ex;
 wire [ 5:0] ds_ecode;
@@ -62,6 +71,8 @@ wire        ds_rdcntv_hi;
 wire        ds_rdcntid;
 wire [ 2:0] tlb_op;
 wire [ 4:0] invtlb_op;
+wire        inst_cacop;
+wire [ 4:0] cacop_code;
 
 wire [18:0] alu_op      ;
 wire        es_load_op;
@@ -91,6 +102,8 @@ assign {ds_ex,              // 1  (198)
         ds_rdcntid,         // 1  (180)
         tlb_op,
         invtlb_op,
+        inst_cacop,
+        cacop_code,
         // original 180-bit payload
         alu_op,             // 19 (179:161)
         es_load_op,         // 1  (160)
@@ -447,10 +460,15 @@ wire [31:0] data_tlb_paddr = (s1_ps == 6'd22) ? {s1_ppn[19:10], data_vaddr[21:0]
 wire [31:0] data_paddr = !csr_pg      ? data_vaddr :
                          data_dmw_hit ? data_dmw_paddr :
                                         data_tlb_paddr;
-wire data_mem_op  = es_load_op || es_mem_we;
+wire [ 1:0] data_mat = !csr_pg       ? csr_crmd[8:7] :
+                       data_dmw0_hit ? csr_dmw0[5:4] :
+                       data_dmw1_hit ? csr_dmw1[5:4] :
+                                       s1_mat;
+wire cacop_hit_op = inst_cacop && (cacop_code[4:3] == 2'b10);
+wire data_mem_op  = es_load_op || es_mem_we || cacop_hit_op;
 wire data_use_tlb = csr_pg && !data_dmw_hit;
 wire data_tlbr_ex = es_valid && data_mem_op && data_use_tlb && !s1_found;
-wire data_pil_ex  = es_valid && es_load_op && data_use_tlb && s1_found && !s1_v;
+wire data_pil_ex  = es_valid && (es_load_op || cacop_hit_op) && data_use_tlb && s1_found && !s1_v;
 wire data_pis_ex  = es_valid && es_mem_we  && data_use_tlb && s1_found && !s1_v;
 wire data_ppi_ex  = es_valid && data_mem_op && data_use_tlb && s1_found && s1_v
                     && (csr_plv > s1_plv);
@@ -620,12 +638,25 @@ assign data_sram_wstrb  = es_mem_we && mem_access_ok ?
                              (mem_size == 2'b01) ? st_h_we : st_w_we) : 4'h0;
 assign data_sram_addr   = data_paddr;
 assign data_sram_wdata  = (mem_size == 2'b00) ? st_b_wdata :
-                         (mem_size == 2'b01) ? st_h_wdata : st_w_wdata;
+                          (mem_size == 2'b01) ? st_h_wdata : st_w_wdata;
+assign data_sram_uncached = (data_mat == 2'b00);
+
+// ============================================================
+// Cache maintenance interface
+// ============================================================
+assign cacop_valid     = es_valid && inst_cacop && !ex_pending && ms_allowin;
+assign cacop_is_dcache = (cacop_code[2:0] == 3'b001);
+assign cacop_op        = cacop_code[4:3];
+assign cacop_index     = cacop_hit_op ? data_paddr[11:4] : data_vaddr[11:4];
+assign cacop_way       = data_vaddr[0];
+assign cacop_tag       = data_paddr[31:12];
 
 // ============================================================
 // Pipeline control
 // ============================================================
-assign es_ready_go    = div_op ? div_done : (!es_mem_access || data_sram_addr_ok);
+assign es_ready_go    = div_op ? div_done :
+                        inst_cacop ? (ex_pending || cacop_ok) :
+                        (!es_mem_access || data_sram_addr_ok);
 assign es_allowin     = !es_valid || es_ready_go && ms_allowin;
 assign es_to_ms_valid = es_valid && es_ready_go;
 

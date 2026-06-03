@@ -1,122 +1,282 @@
 `include "mycpu.vh"
 
 module mycpu_top(
-    input         aclk,
-    input         aresetn,
+    input           aclk,
+    input           aresetn,
+    input    [ 7:0] intrpt,
 
-    output [ 3:0] arid,
-    output [31:0] araddr,
-    output [ 7:0] arlen,
-    output [ 2:0] arsize,
-    output [ 1:0] arburst,
-    output [ 1:0] arlock,
-    output [ 3:0] arcache,
-    output [ 2:0] arprot,
-    output        arvalid,
-    input         arready,
-    input  [ 3:0] rid,
-    input  [31:0] rdata,
-    input  [ 1:0] rresp,
-    input         rlast,
-    input         rvalid,
-    output        rready,
+    output   [ 3:0] arid,
+    output   [31:0] araddr,
+    output   [ 7:0] arlen,
+    output   [ 2:0] arsize,
+    output   [ 1:0] arburst,
+    output   [ 1:0] arlock,
+    output   [ 3:0] arcache,
+    output   [ 2:0] arprot,
+    output          arvalid,
+    input           arready,
+    input    [ 3:0] rid,
+    input    [31:0] rdata,
+    input    [ 1:0] rresp,
+    input           rlast,
+    input           rvalid,
+    output          rready,
 
-    output [ 3:0] awid,
-    output [31:0] awaddr,
-    output [ 7:0] awlen,
-    output [ 2:0] awsize,
-    output [ 1:0] awburst,
-    output [ 1:0] awlock,
-    output [ 3:0] awcache,
-    output [ 2:0] awprot,
-    output        awvalid,
-    input         awready,
-    output [ 3:0] wid,
-    output [31:0] wdata,
-    output [ 3:0] wstrb,
-    output        wlast,
-    output        wvalid,
-    input         wready,
-    input  [ 3:0] bid,
-    input  [ 1:0] bresp,
-    input         bvalid,
-    output        bready,
+    output   [ 3:0] awid,
+    output   [31:0] awaddr,
+    output   [ 7:0] awlen,
+    output   [ 2:0] awsize,
+    output   [ 1:0] awburst,
+    output   [ 1:0] awlock,
+    output   [ 3:0] awcache,
+    output   [ 2:0] awprot,
+    output          awvalid,
+    input           awready,
+    output   [ 3:0] wid,
+    output   [31:0] wdata,
+    output   [ 3:0] wstrb,
+    output          wlast,
+    output          wvalid,
+    input           wready,
+    input    [ 3:0] bid,
+    input    [ 1:0] bresp,
+    input           bvalid,
+    output          bready,
 
-    output [31:0] debug_wb_pc,
-    output [ 3:0] debug_wb_rf_we,
-    output [ 4:0] debug_wb_rf_wnum,
-    output [31:0] debug_wb_rf_wdata
+    output [31:0] debug0_wb_pc,
+    output [ 3:0] debug0_wb_rf_wen,
+    output [ 4:0] debug0_wb_rf_wnum,
+    output [31:0] debug0_wb_rf_wdata
+`ifdef CPU_2CMT
+    ,
+    output [31:0] debug1_wb_pc,
+    output [ 3:0] debug1_wb_rf_wen,
+    output [ 4:0] debug1_wb_rf_wnum,
+    output [31:0] debug1_wb_rf_wdata
+`endif
 );
 
-wire        inst_sram_req;
-wire        inst_sram_wr;
-wire [ 1:0] inst_sram_size;
-wire [ 3:0] inst_sram_wstrb;
-wire [31:0] inst_sram_addr;
-wire [31:0] inst_sram_wdata;
-wire        inst_sram_addr_ok;
-wire        inst_sram_data_ok;
-wire [31:0] inst_sram_rdata;
+wire        core_inst_req;
+wire        core_inst_wr;
+wire [ 1:0] core_inst_size;
+wire [ 3:0] core_inst_wstrb;
+wire [31:0] core_inst_addr;
+wire [31:0] core_inst_wdata;
+wire        core_inst_addr_ok;
+wire        core_inst_data_ok;
+wire [31:0] core_inst_rdata;
 
-wire        data_sram_req;
-wire        data_sram_wr;
-wire [ 1:0] data_sram_size;
-wire [ 3:0] data_sram_wstrb;
-wire [31:0] data_sram_addr;
-wire [31:0] data_sram_wdata;
-wire        data_sram_addr_ok;
-wire        data_sram_data_ok;
-wire [31:0] data_sram_rdata;
+wire        icache_rd_req;
+wire [ 2:0] icache_rd_type;
+wire [31:0] icache_rd_addr;
+wire        icache_rd_rdy;
+wire        icache_ret_valid;
+wire        icache_ret_last;
+wire [31:0] icache_ret_data;
+
+wire        core_data_req;
+wire        core_data_wr;
+wire [ 1:0] core_data_size;
+wire [ 3:0] core_data_wstrb;
+wire [31:0] core_data_addr;
+wire [31:0] core_data_wdata;
+wire        core_data_uncached;
+wire        core_data_addr_ok;
+wire        core_data_data_ok;
+wire [31:0] core_data_rdata;
+
+wire        core_cacop_valid;
+wire        core_cacop_is_dcache;
+wire [ 1:0] core_cacop_op;
+wire [ 7:0] core_cacop_index;
+wire        core_cacop_way;
+wire [19:0] core_cacop_tag;
+wire        core_cacop_ok;
+wire        icache_cacop_ok;
+wire        dcache_cacop_ok;
+
+wire        dcache_addr_ok;
+wire        dcache_data_ok;
+wire [31:0] dcache_rdata;
+wire        dcache_rd_req;
+wire [ 2:0] dcache_rd_type;
+wire [31:0] dcache_rd_addr;
+wire        dcache_rd_rdy;
+wire        dcache_ret_valid;
+wire        dcache_ret_last;
+wire [31:0] dcache_ret_data;
+wire        dcache_wr_req;
+wire [ 2:0] dcache_wr_type;
+wire [31:0] dcache_wr_addr;
+wire [ 3:0] dcache_wr_wstrb;
+wire [127:0] dcache_wr_data;
+wire        dcache_wr_rdy;
+
+wire        uncache_req;
+wire        uncache_wr;
+wire [ 1:0] uncache_size;
+wire [ 3:0] uncache_wstrb;
+wire [31:0] uncache_addr;
+wire [31:0] uncache_wdata;
+wire        uncache_addr_ok;
+wire        uncache_data_ok;
+wire [31:0] uncache_rdata;
 
 mycpu_core u_core(
     .clk                (aclk                ),
     .resetn             (aresetn             ),
-    .hw_int_in          (8'b0                ),
-    .inst_sram_req      (inst_sram_req       ),
-    .inst_sram_wr       (inst_sram_wr        ),
-    .inst_sram_size     (inst_sram_size      ),
-    .inst_sram_wstrb    (inst_sram_wstrb     ),
-    .inst_sram_addr     (inst_sram_addr      ),
-    .inst_sram_wdata    (inst_sram_wdata     ),
-    .inst_sram_addr_ok  (inst_sram_addr_ok   ),
-    .inst_sram_data_ok  (inst_sram_data_ok   ),
-    .inst_sram_rdata    (inst_sram_rdata     ),
-    .data_sram_req      (data_sram_req       ),
-    .data_sram_wr       (data_sram_wr        ),
-    .data_sram_size     (data_sram_size      ),
-    .data_sram_wstrb    (data_sram_wstrb     ),
-    .data_sram_addr     (data_sram_addr      ),
-    .data_sram_wdata    (data_sram_wdata     ),
-    .data_sram_addr_ok  (data_sram_addr_ok   ),
-    .data_sram_data_ok  (data_sram_data_ok   ),
-    .data_sram_rdata    (data_sram_rdata     ),
-    .debug_wb_pc        (debug_wb_pc         ),
-    .debug_wb_rf_we     (debug_wb_rf_we      ),
-    .debug_wb_rf_wnum   (debug_wb_rf_wnum    ),
-    .debug_wb_rf_wdata  (debug_wb_rf_wdata   )
+    .hw_int_in          (intrpt              ),
+    .inst_sram_req      (core_inst_req       ),
+    .inst_sram_wr       (core_inst_wr        ),
+    .inst_sram_size     (core_inst_size      ),
+    .inst_sram_wstrb    (core_inst_wstrb     ),
+    .inst_sram_addr     (core_inst_addr      ),
+    .inst_sram_wdata    (core_inst_wdata     ),
+    .inst_sram_addr_ok  (core_inst_addr_ok   ),
+    .inst_sram_data_ok  (core_inst_data_ok   ),
+    .inst_sram_rdata    (core_inst_rdata     ),
+    .data_sram_req      (core_data_req       ),
+    .data_sram_wr       (core_data_wr        ),
+    .data_sram_size     (core_data_size      ),
+    .data_sram_wstrb    (core_data_wstrb     ),
+    .data_sram_addr     (core_data_addr      ),
+    .data_sram_wdata    (core_data_wdata     ),
+    .data_sram_uncached (core_data_uncached  ),
+    .data_sram_addr_ok  (core_data_addr_ok   ),
+    .data_sram_data_ok  (core_data_data_ok   ),
+    .data_sram_rdata    (core_data_rdata     ),
+    .cacop_valid        (core_cacop_valid    ),
+    .cacop_is_dcache    (core_cacop_is_dcache),
+    .cacop_op           (core_cacop_op       ),
+    .cacop_index        (core_cacop_index    ),
+    .cacop_way          (core_cacop_way      ),
+    .cacop_tag          (core_cacop_tag      ),
+    .cacop_ok           (core_cacop_ok       ),
+    .debug_wb_pc        (debug0_wb_pc        ),
+    .debug_wb_rf_we     (debug0_wb_rf_wen    ),
+    .debug_wb_rf_wnum   (debug0_wb_rf_wnum   ),
+    .debug_wb_rf_wdata  (debug0_wb_rf_wdata  )
+);
+
+`ifdef CPU_2CMT
+assign debug1_wb_pc       = 32'b0;
+assign debug1_wb_rf_wen   = 4'b0;
+assign debug1_wb_rf_wnum  = 5'b0;
+assign debug1_wb_rf_wdata = 32'b0;
+`endif
+
+assign core_data_addr_ok = core_data_uncached ? uncache_addr_ok : dcache_addr_ok;
+assign core_data_data_ok = uncache_data_ok || dcache_data_ok;
+assign core_data_rdata   = uncache_data_ok ? uncache_rdata : dcache_rdata;
+assign core_cacop_ok     = core_cacop_is_dcache ? dcache_cacop_ok : icache_cacop_ok;
+
+assign uncache_req   = core_data_req && core_data_uncached;
+assign uncache_wr    = core_data_wr;
+assign uncache_size  = core_data_size;
+assign uncache_wstrb = core_data_wstrb;
+assign uncache_addr  = core_data_addr;
+assign uncache_wdata = core_data_wdata;
+
+icache u_icache(
+    .clk                (aclk                ),
+    .resetn             (aresetn             ),
+    .valid              (core_inst_req       ),
+    .op                 (1'b0                ),
+    .index              (core_inst_addr[11:4]),
+    .tag                (core_inst_addr[31:12]),
+    .offset             (core_inst_addr[3:0] ),
+    .wstrb              (4'b0                ),
+    .wdata              (32'b0               ),
+    .addr_ok            (core_inst_addr_ok   ),
+    .data_ok            (core_inst_data_ok   ),
+    .rdata              (core_inst_rdata     ),
+    .cacop_valid        (core_cacop_valid && !core_cacop_is_dcache),
+    .cacop_op           (core_cacop_op       ),
+    .cacop_index        (core_cacop_index    ),
+    .cacop_way          (core_cacop_way      ),
+    .cacop_tag          (core_cacop_tag      ),
+    .cacop_ok           (icache_cacop_ok     ),
+    .rd_req             (icache_rd_req       ),
+    .rd_type            (icache_rd_type      ),
+    .rd_addr            (icache_rd_addr      ),
+    .rd_rdy             (icache_rd_rdy       ),
+    .ret_valid          (icache_ret_valid    ),
+    .ret_last           (icache_ret_last     ),
+    .ret_data           (icache_ret_data     ),
+    .wr_req             (                    ),
+    .wr_type            (                    ),
+    .wr_addr            (                    ),
+    .wr_wstrb           (                    ),
+    .wr_data            (                    ),
+    .wr_rdy             (1'b0                )
+);
+
+dcache u_dcache(
+    .clk                (aclk                ),
+    .resetn             (aresetn             ),
+    .valid              (core_data_req && !core_data_uncached),
+    .op                 (core_data_wr        ),
+    .index              (core_data_addr[11:4]),
+    .tag                (core_data_addr[31:12]),
+    .offset             (core_data_addr[3:0] ),
+    .wstrb              (core_data_wstrb     ),
+    .wdata              (core_data_wdata     ),
+    .addr_ok            (dcache_addr_ok      ),
+    .data_ok            (dcache_data_ok      ),
+    .rdata              (dcache_rdata        ),
+    .cacop_valid        (core_cacop_valid && core_cacop_is_dcache),
+    .cacop_op           (core_cacop_op       ),
+    .cacop_index        (core_cacop_index    ),
+    .cacop_way          (core_cacop_way      ),
+    .cacop_tag          (core_cacop_tag      ),
+    .cacop_ok           (dcache_cacop_ok     ),
+    .rd_req             (dcache_rd_req       ),
+    .rd_type            (dcache_rd_type      ),
+    .rd_addr            (dcache_rd_addr      ),
+    .rd_rdy             (dcache_rd_rdy       ),
+    .ret_valid          (dcache_ret_valid    ),
+    .ret_last           (dcache_ret_last     ),
+    .ret_data           (dcache_ret_data     ),
+    .wr_req             (dcache_wr_req       ),
+    .wr_type            (dcache_wr_type      ),
+    .wr_addr            (dcache_wr_addr      ),
+    .wr_wstrb           (dcache_wr_wstrb     ),
+    .wr_data            (dcache_wr_data      ),
+    .wr_rdy             (dcache_wr_rdy       )
 );
 
 sram_axi_bridge_2x1 u_sram_axi_bridge(
     .clk                (aclk                ),
     .resetn             (aresetn             ),
-    .inst_sram_req      (inst_sram_req       ),
-    .inst_sram_wr       (inst_sram_wr        ),
-    .inst_sram_size     (inst_sram_size      ),
-    .inst_sram_wstrb    (inst_sram_wstrb     ),
-    .inst_sram_addr     (inst_sram_addr      ),
-    .inst_sram_wdata    (inst_sram_wdata     ),
-    .inst_sram_addr_ok  (inst_sram_addr_ok   ),
-    .inst_sram_data_ok  (inst_sram_data_ok   ),
-    .inst_sram_rdata    (inst_sram_rdata     ),
-    .data_sram_req      (data_sram_req       ),
-    .data_sram_wr       (data_sram_wr        ),
-    .data_sram_size     (data_sram_size      ),
-    .data_sram_wstrb    (data_sram_wstrb     ),
-    .data_sram_addr     (data_sram_addr      ),
-    .data_sram_wdata    (data_sram_wdata     ),
-    .data_sram_addr_ok  (data_sram_addr_ok   ),
-    .data_sram_data_ok  (data_sram_data_ok   ),
-    .data_sram_rdata    (data_sram_rdata     ),
+    .icache_rd_req      (icache_rd_req       ),
+    .icache_rd_type     (icache_rd_type      ),
+    .icache_rd_addr     (icache_rd_addr      ),
+    .icache_rd_rdy      (icache_rd_rdy       ),
+    .icache_ret_valid   (icache_ret_valid    ),
+    .icache_ret_last    (icache_ret_last     ),
+    .icache_ret_data    (icache_ret_data     ),
+    .dcache_rd_req      (dcache_rd_req       ),
+    .dcache_rd_type     (dcache_rd_type      ),
+    .dcache_rd_addr     (dcache_rd_addr      ),
+    .dcache_rd_rdy      (dcache_rd_rdy       ),
+    .dcache_ret_valid   (dcache_ret_valid    ),
+    .dcache_ret_last    (dcache_ret_last     ),
+    .dcache_ret_data    (dcache_ret_data     ),
+    .dcache_wr_req      (dcache_wr_req       ),
+    .dcache_wr_type     (dcache_wr_type      ),
+    .dcache_wr_addr     (dcache_wr_addr      ),
+    .dcache_wr_wstrb    (dcache_wr_wstrb     ),
+    .dcache_wr_data     (dcache_wr_data      ),
+    .dcache_wr_rdy      (dcache_wr_rdy       ),
+    .uncache_req        (uncache_req         ),
+    .uncache_wr         (uncache_wr          ),
+    .uncache_size       (uncache_size        ),
+    .uncache_wstrb      (uncache_wstrb       ),
+    .uncache_addr       (uncache_addr        ),
+    .uncache_wdata      (uncache_wdata       ),
+    .uncache_addr_ok    (uncache_addr_ok     ),
+    .uncache_data_ok    (uncache_data_ok     ),
+    .uncache_rdata      (uncache_rdata       ),
     .arid               (arid                ),
     .araddr             (araddr              ),
     .arlen              (arlen               ),
@@ -161,25 +321,38 @@ module sram_axi_bridge_2x1(
     input         clk,
     input         resetn,
 
-    input         inst_sram_req,
-    input         inst_sram_wr,
-    input  [ 1:0] inst_sram_size,
-    input  [ 3:0] inst_sram_wstrb,
-    input  [31:0] inst_sram_addr,
-    input  [31:0] inst_sram_wdata,
-    output        inst_sram_addr_ok,
-    output        inst_sram_data_ok,
-    output [31:0] inst_sram_rdata,
+    input         icache_rd_req,
+    input  [ 2:0] icache_rd_type,
+    input  [31:0] icache_rd_addr,
+    output        icache_rd_rdy,
+    output        icache_ret_valid,
+    output        icache_ret_last,
+    output [31:0] icache_ret_data,
 
-    input         data_sram_req,
-    input         data_sram_wr,
-    input  [ 1:0] data_sram_size,
-    input  [ 3:0] data_sram_wstrb,
-    input  [31:0] data_sram_addr,
-    input  [31:0] data_sram_wdata,
-    output        data_sram_addr_ok,
-    output        data_sram_data_ok,
-    output [31:0] data_sram_rdata,
+    input         dcache_rd_req,
+    input  [ 2:0] dcache_rd_type,
+    input  [31:0] dcache_rd_addr,
+    output        dcache_rd_rdy,
+    output        dcache_ret_valid,
+    output        dcache_ret_last,
+    output [31:0] dcache_ret_data,
+
+    input         dcache_wr_req,
+    input  [ 2:0] dcache_wr_type,
+    input  [31:0] dcache_wr_addr,
+    input  [ 3:0] dcache_wr_wstrb,
+    input  [127:0] dcache_wr_data,
+    output        dcache_wr_rdy,
+
+    input         uncache_req,
+    input         uncache_wr,
+    input  [ 1:0] uncache_size,
+    input  [ 3:0] uncache_wstrb,
+    input  [31:0] uncache_addr,
+    input  [31:0] uncache_wdata,
+    output        uncache_addr_ok,
+    output        uncache_data_ok,
+    output [31:0] uncache_rdata,
 
     output [ 3:0] arid,
     output [31:0] araddr,
@@ -224,64 +397,79 @@ localparam ST_IDLE    = 3'd0;
 localparam ST_RD_ADDR = 3'd1;
 localparam ST_RD_RESP = 3'd2;
 localparam ST_WR_ADDR = 3'd3;
-localparam ST_WR_RESP = 3'd4;
+localparam ST_WR_DATA = 3'd4;
+localparam ST_WR_RESP = 3'd5;
 
 reg [2:0] state;
-reg       rd_sel_data;
-reg       aw_done;
-reg       w_done;
+reg [1:0] rd_source;
+reg [ 7:0] rd_len_r;
 reg [31:0] rd_addr_r;
 reg [ 1:0] rd_size_r;
-reg [31:0] wr_data_r;
+reg [127:0] wr_data_r;
 reg [ 3:0] wr_strb_r;
 reg [31:0] wr_addr_r;
 reg [ 1:0] wr_size_r;
+reg [ 7:0] wr_len_r;
+reg [ 1:0] wr_cnt;
+reg        wr_is_uncache;
 
-wire sel_data = data_sram_req;
-wire sel_inst = !data_sram_req && inst_sram_req;
-wire sel_wr   = sel_data && data_sram_wr;
-wire sel_rd   = sel_inst || (sel_data && !data_sram_wr);
+wire sel_uncache_wr = uncache_req && uncache_wr;
+wire sel_uncache_rd = uncache_req && !uncache_wr;
+wire sel_dcache_wr  = !uncache_req && dcache_wr_req;
+wire sel_dcache_rd  = !uncache_req && !dcache_wr_req && dcache_rd_req;
+wire sel_icache_rd  = !uncache_req && !dcache_wr_req && !dcache_rd_req && icache_rd_req;
 
-wire [1:0] req_size = sel_data ? data_sram_size : inst_sram_size;
-wire [31:0] req_addr = sel_data ? data_sram_addr : inst_sram_addr;
+wire sel_rd = sel_uncache_rd || sel_dcache_rd || sel_icache_rd;
+wire sel_wr = sel_uncache_wr || sel_dcache_wr;
+
+wire [1:0] req_size = sel_uncache_rd ? uncache_size : 2'b10;
+wire [31:0] req_addr = sel_uncache_rd ? uncache_addr :
+                       sel_dcache_rd  ? dcache_rd_addr :
+                                        icache_rd_addr;
+wire [7:0] req_len = sel_uncache_rd ? 8'd0 : 8'd3;
+wire [1:0] req_source = sel_uncache_rd ? 2'd2 :
+                        sel_dcache_rd  ? 2'd1 : 2'd0;
 
 wire rd_addr_hs = arvalid && arready;
 wire rd_data_hs = rvalid && rready;
 wire aw_hs      = awvalid && awready;
 wire w_hs       = wvalid && wready;
-wire wr_addr_hs = (aw_done || aw_hs) && (w_done || w_hs);
 wire wr_resp_hs = bvalid && bready;
 
 always @(posedge clk) begin
     if (!resetn) begin
         state       <= ST_IDLE;
-        rd_sel_data <= 1'b0;
-        aw_done     <= 1'b0;
-        w_done      <= 1'b0;
+        rd_source   <= 2'b0;
+        rd_len_r    <= 8'b0;
         rd_addr_r   <= 32'b0;
         rd_size_r   <= 2'b0;
-        wr_data_r   <= 32'b0;
+        wr_data_r   <= 128'b0;
         wr_strb_r   <= 4'b0;
         wr_addr_r   <= 32'b0;
         wr_size_r   <= 2'b0;
+        wr_len_r    <= 8'b0;
+        wr_cnt      <= 2'b0;
+        wr_is_uncache <= 1'b0;
     end
     else begin
         case (state)
         ST_IDLE: begin
-            aw_done <= 1'b0;
-            w_done  <= 1'b0;
-            if (sel_rd) begin
+            wr_cnt <= 2'b0;
+            if (sel_wr) begin
+                wr_data_r     <= sel_uncache_wr ? {96'b0, uncache_wdata} : dcache_wr_data;
+                wr_strb_r     <= sel_uncache_wr ? uncache_wstrb : dcache_wr_wstrb;
+                wr_addr_r     <= sel_uncache_wr ? uncache_addr  : dcache_wr_addr;
+                wr_size_r     <= sel_uncache_wr ? uncache_size  : 2'b10;
+                wr_len_r      <= sel_uncache_wr ? 8'd0 : 8'd3;
+                wr_is_uncache <= sel_uncache_wr;
+                state         <= ST_WR_ADDR;
+            end
+            else if (sel_rd) begin
                 rd_addr_r   <= req_addr;
                 rd_size_r   <= req_size;
-                rd_sel_data <= sel_data;
+                rd_len_r    <= req_len;
+                rd_source   <= req_source;
                 state       <= ST_RD_ADDR;
-            end
-            else if (sel_wr) begin
-                wr_data_r <= data_sram_wdata;
-                wr_strb_r <= data_sram_wstrb;
-                wr_addr_r <= data_sram_addr;
-                wr_size_r <= data_sram_size;
-                state     <= ST_WR_ADDR;
             end
         end
         ST_RD_ADDR: begin
@@ -290,17 +478,23 @@ always @(posedge clk) begin
             end
         end
         ST_RD_RESP: begin
-            if (rd_data_hs) begin
+            if (rd_data_hs && rlast) begin
                 state <= ST_IDLE;
             end
         end
         ST_WR_ADDR: begin
-            aw_done <= aw_done || aw_hs;
-            w_done  <= w_done  || w_hs;
-            if (wr_addr_hs) begin
-                state   <= ST_WR_RESP;
-                aw_done <= 1'b0;
-                w_done  <= 1'b0;
+            if (aw_hs) begin
+                state <= ST_WR_DATA;
+            end
+        end
+        ST_WR_DATA: begin
+            if (w_hs) begin
+                if (wlast) begin
+                    state <= ST_WR_RESP;
+                end
+                else begin
+                    wr_cnt <= wr_cnt + 2'b01;
+                end
             end
         end
         ST_WR_RESP: begin
@@ -315,9 +509,9 @@ always @(posedge clk) begin
     end
 end
 
-assign arid     = rd_sel_data ? 4'd1 : 4'd0;
+assign arid     = (rd_source == 2'd0) ? 4'd0 : 4'd1;
 assign araddr   = rd_addr_r;
-assign arlen    = 8'd0;
+assign arlen    = rd_len_r;
 assign arsize   = {1'b0, rd_size_r};
 assign arburst  = 2'b01;
 assign arlock   = 2'b00;
@@ -328,28 +522,39 @@ assign rready   = (state == ST_RD_RESP);
 
 assign awid     = 4'd1;
 assign awaddr   = wr_addr_r;
-assign awlen    = 8'd0;
+assign awlen    = wr_len_r;
 assign awsize   = {1'b0, wr_size_r};
 assign awburst  = 2'b01;
 assign awlock   = 2'b00;
 assign awcache  = 4'b0000;
 assign awprot   = 3'b000;
-assign awvalid  = (state == ST_WR_ADDR) && !aw_done;
+assign awvalid  = (state == ST_WR_ADDR);
 
 assign wid      = 4'd1;
-assign wdata    = wr_data_r;
+assign wdata    = (wr_cnt == 2'd0) ? wr_data_r[ 31: 0] :
+                  (wr_cnt == 2'd1) ? wr_data_r[ 63:32] :
+                  (wr_cnt == 2'd2) ? wr_data_r[ 95:64] :
+                                      wr_data_r[127:96];
 assign wstrb    = wr_strb_r;
-assign wlast    = 1'b1;
-assign wvalid   = (state == ST_WR_ADDR) && !w_done;
+assign wlast    = wr_is_uncache || (wr_cnt == 2'd3);
+assign wvalid   = (state == ST_WR_DATA);
 assign bready   = (state == ST_WR_RESP);
 
-assign inst_sram_addr_ok = (state == ST_IDLE) && sel_inst;
-assign data_sram_addr_ok = (state == ST_IDLE) && sel_data;
-assign inst_sram_data_ok = (state == ST_RD_RESP) && !rd_sel_data && rd_data_hs;
-assign data_sram_data_ok = ((state == ST_RD_RESP) &&  rd_sel_data && rd_data_hs)
-                         || ((state == ST_WR_RESP) && wr_resp_hs);
-assign inst_sram_rdata = rdata;
-assign data_sram_rdata = rdata;
+assign uncache_addr_ok  = (state == ST_IDLE) && uncache_req;
+assign uncache_data_ok  = ((state == ST_RD_RESP) && (rd_source == 2'd2) && rd_data_hs)
+                        || ((state == ST_WR_RESP) && wr_is_uncache && wr_resp_hs);
+assign uncache_rdata    = rdata;
+
+assign dcache_wr_rdy    = (state == ST_IDLE) && sel_dcache_wr;
+assign dcache_rd_rdy    = (state == ST_IDLE) && sel_dcache_rd;
+assign dcache_ret_valid = (state == ST_RD_RESP) && (rd_source == 2'd1) && rd_data_hs;
+assign dcache_ret_last  = dcache_ret_valid && rlast;
+assign dcache_ret_data  = rdata;
+
+assign icache_rd_rdy    = (state == ST_IDLE) && sel_icache_rd;
+assign icache_ret_valid = (state == ST_RD_RESP) && (rd_source == 2'd0) && rd_data_hs;
+assign icache_ret_last  = icache_ret_valid && rlast;
+assign icache_ret_data  = rdata;
 
 endmodule
 
@@ -375,9 +580,18 @@ module mycpu_core(
     output [ 3:0] data_sram_wstrb,
     output [31:0] data_sram_addr,
     output [31:0] data_sram_wdata,
+    output        data_sram_uncached,
     input         data_sram_addr_ok,
     input         data_sram_data_ok,
     input  [31:0] data_sram_rdata,
+    // cache maintenance interface
+    output        cacop_valid,
+    output        cacop_is_dcache,
+    output [ 1:0] cacop_op,
+    output [ 7:0] cacop_index,
+    output        cacop_way,
+    output [19:0] cacop_tag,
+    input         cacop_ok,
     // trace debug interface
     output [31:0] debug_wb_pc,
     output [ 3:0] debug_wb_rf_we,
@@ -539,9 +753,17 @@ exe_stage exe_stage(
     .data_sram_wstrb  (data_sram_wstrb ),
     .data_sram_addr   (data_sram_addr  ),
     .data_sram_wdata  (data_sram_wdata ),
+    .data_sram_uncached(data_sram_uncached),
     .data_sram_addr_ok(data_sram_addr_ok),
     .data_sram_data_ok(data_sram_data_ok),
     .data_sram_rdata  (data_sram_rdata ),
+    .cacop_valid      (cacop_valid      ),
+    .cacop_is_dcache  (cacop_is_dcache  ),
+    .cacop_op         (cacop_op         ),
+    .cacop_index      (cacop_index      ),
+    .cacop_way        (cacop_way        ),
+    .cacop_tag        (cacop_tag        ),
+    .cacop_ok         (cacop_ok         ),
     // hazard detect info
     .es_to_ds_dest  (es_to_ds_dest  ),
     .es_to_ds_load_op(es_to_ds_load_op),

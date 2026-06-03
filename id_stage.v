@@ -292,8 +292,10 @@ wire inst_tlbwr;
 wire inst_tlbfill;
 wire inst_invtlb_base;
 wire inst_invtlb;
+wire inst_cacop;
 wire [2:0] tlb_op;
 wire [4:0] invtlb_op;
+wire [4:0] cacop_code;
 
 assign inst_tlb_base = op_31_26_d[6'h01] & op_25_22_d[4'h9] & op_21_20_d[2'h0];
 assign inst_tlbsrch  = inst_tlb_base & op_19_15_d[5'h10] & (ds_inst[14:10] == 5'h0a) & (rj == 5'b0) & (rd == 5'b0);
@@ -305,6 +307,8 @@ assign inst_ertn     = inst_tlb_base & op_19_15_d[5'h10] & (ds_inst[14:10] == 5'
 assign inst_invtlb_base = inst_tlb_base & op_19_15_d[5'h13];
 assign inst_invtlb      = inst_invtlb_base & (rd <= 5'd6);
 assign invtlb_op        = rd;
+assign inst_cacop       = (ds_inst[31:22] == 10'b0000011000);
+assign cacop_code       = rd;
 
 assign tlb_op = inst_tlbsrch ? 3'd1 :
                 inst_tlbrd   ? 3'd2 :
@@ -357,7 +361,8 @@ assign inst_valid = inst_add_w | inst_sub_w | inst_slt | inst_sltu |
                     inst_csrrd | inst_csrwr | inst_csrxchg |
                     inst_syscall | inst_ertn | inst_break |
                     inst_rdcntvl_w | inst_rdcntvh_w | inst_rdcntid |
-                    inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill | inst_invtlb;
+                    inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill | inst_invtlb |
+                    inst_cacop;
 
 // ============================================================
 // Common decode helpers
@@ -370,7 +375,7 @@ assign mem_size     = (inst_ld_b | inst_ld_bu | inst_st_b) ? 2'b00 :
                       (inst_ld_h | inst_ld_hu | inst_st_h) ? 2'b01 : 2'b10;
 assign mem_unsigned = inst_ld_bu | inst_ld_hu;
 
-assign alu_op[ 0] = inst_add_w | inst_addi_w | load_op | store_op
+assign alu_op[ 0] = inst_add_w | inst_addi_w | load_op | store_op | inst_cacop
                     | inst_jirl | inst_bl | inst_pcaddu12i;
 assign alu_op[ 1] = inst_sub_w;
 assign alu_op[ 2] = inst_slt | inst_slti;
@@ -392,7 +397,7 @@ assign alu_op[17] = inst_div_wu;
 assign alu_op[18] = inst_mod_wu;
 
 assign need_ui5   = inst_slli_w | inst_srli_w | inst_srai_w;
-assign need_si12  = inst_addi_w | load_op | store_op | inst_slti | inst_sltui;
+assign need_si12  = inst_addi_w | load_op | store_op | inst_cacop | inst_slti | inst_sltui;
 assign need_ui12  = inst_andi | inst_ori | inst_xori;
 assign need_si16  = inst_jirl | branch_op;
 assign need_si20  = inst_lu12i_w | inst_pcaddu12i;
@@ -419,6 +424,7 @@ assign src2_is_imm   = inst_slli_w |
                        inst_addi_w |
                        load_op     |
                        store_op    |
+                       inst_cacop   |
                        inst_lu12i_w|
                        inst_pcaddu12i |
                        inst_slti    |
@@ -435,7 +441,8 @@ assign dst_is_r1     = inst_bl;
 // gr_we: rdcntv and rdcntid write GR; break/syscall/ertn do not
 assign gr_we = inst_rdcntv | inst_rdcntid |
                (~store_op & ~branch_op & ~inst_b & ~inst_syscall & ~inst_ertn & ~inst_break
-                & ~inst_tlbsrch & ~inst_tlbrd & ~inst_tlbwr & ~inst_tlbfill & ~inst_invtlb_base);
+                & ~inst_tlbsrch & ~inst_tlbrd & ~inst_tlbwr & ~inst_tlbfill & ~inst_invtlb_base
+                & ~inst_cacop);
 assign mem_we = store_op;
 
 assign dest  = dst_is_r1    ? 5'd1 :
@@ -486,7 +493,7 @@ assign br_taken = (   inst_beq  &&  rj_eq_rd
                   )  && ds_valid && ~load_stall && (fs_ex !== 1'b1);
 
 assign inst_no_dest = store_op | inst_b | branch_op | inst_tlbsrch | inst_tlbrd
-                      | inst_tlbwr | inst_tlbfill | inst_invtlb_base;
+                      | inst_tlbwr | inst_tlbfill | inst_invtlb_base | inst_cacop;
 
 // ============================================================
 // Hazard detection
@@ -602,7 +609,7 @@ assign {rf_we   ,  //37:37
 // ============================================================
 // DS -> ES bus
 // Format: {ds_ex, ds_ecode, ds_esubcode, rdcntv, rdcntvh, rdcntid,
-//           tlb_op, invtlb_op,
+//           tlb_op, invtlb_op, inst_cacop, cacop_code,
 //           original 180-bit fields}
 // ============================================================
 assign ds_to_es_bus = {ds_ex,
@@ -613,6 +620,8 @@ assign ds_to_es_bus = {ds_ex,
                        inst_rdcntid,
                        tlb_op,
                        invtlb_op,
+                       inst_cacop,
+                       cacop_code,
                        // original 180-bit payload
                        alu_op       ,
                        load_op      ,
