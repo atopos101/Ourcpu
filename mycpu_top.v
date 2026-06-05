@@ -15,6 +15,7 @@ module mycpu_top(
     output   [ 2:0] arprot,
     output          arvalid,
     input           arready,
+
     input    [ 3:0] rid,
     input    [31:0] rdata,
     input    [ 1:0] rresp,
@@ -32,12 +33,14 @@ module mycpu_top(
     output   [ 2:0] awprot,
     output          awvalid,
     input           awready,
+
     output   [ 3:0] wid,
     output   [31:0] wdata,
     output   [ 3:0] wstrb,
     output          wlast,
     output          wvalid,
     input           wready,
+
     input    [ 3:0] bid,
     input    [ 1:0] bresp,
     input           bvalid,
@@ -81,6 +84,8 @@ wire [ 3:0] core_data_wstrb;
 wire [31:0] core_data_addr;
 wire [31:0] core_data_wdata;
 wire        core_data_uncached;
+wire        core_data_ll;
+wire        core_data_sc;
 wire        core_data_addr_ok;
 wire        core_data_data_ok;
 wire [31:0] core_data_rdata;
@@ -142,6 +147,8 @@ mycpu_core u_core(
     .data_sram_addr     (core_data_addr      ),
     .data_sram_wdata    (core_data_wdata     ),
     .data_sram_uncached (core_data_uncached  ),
+    .data_sram_ll       (core_data_ll        ),
+    .data_sram_sc       (core_data_sc        ),
     .data_sram_addr_ok  (core_data_addr_ok   ),
     .data_sram_data_ok  (core_data_data_ok   ),
     .data_sram_rdata    (core_data_rdata     ),
@@ -274,6 +281,8 @@ sram_axi_bridge_2x1 u_sram_axi_bridge(
     .uncache_wstrb      (uncache_wstrb       ),
     .uncache_addr       (uncache_addr        ),
     .uncache_wdata      (uncache_wdata       ),
+    .uncache_ll         (core_data_ll        ),
+    .uncache_sc         (core_data_sc        ),
     .uncache_addr_ok    (uncache_addr_ok     ),
     .uncache_data_ok    (uncache_data_ok     ),
     .uncache_rdata      (uncache_rdata       ),
@@ -350,6 +359,8 @@ module sram_axi_bridge_2x1(
     input  [ 3:0] uncache_wstrb,
     input  [31:0] uncache_addr,
     input  [31:0] uncache_wdata,
+    input         uncache_ll,
+    input         uncache_sc,
     output        uncache_addr_ok,
     output        uncache_data_ok,
     output [31:0] uncache_rdata,
@@ -405,6 +416,7 @@ reg [1:0] rd_source;
 reg [ 7:0] rd_len_r;
 reg [31:0] rd_addr_r;
 reg [ 1:0] rd_size_r;
+reg        rd_lock_r;
 reg [127:0] wr_data_r;
 reg [ 3:0] wr_strb_r;
 reg [31:0] wr_addr_r;
@@ -412,6 +424,7 @@ reg [ 1:0] wr_size_r;
 reg [ 7:0] wr_len_r;
 reg [ 1:0] wr_cnt;
 reg        wr_is_uncache;
+reg        wr_lock_r;
 
 wire sel_uncache_wr = uncache_req && uncache_wr;
 wire sel_uncache_rd = uncache_req && !uncache_wr;
@@ -429,6 +442,7 @@ wire [31:0] req_addr = sel_uncache_rd ? uncache_addr :
 wire [7:0] req_len = sel_uncache_rd ? 8'd0 : 8'd3;
 wire [1:0] req_source = sel_uncache_rd ? 2'd2 :
                         sel_dcache_rd  ? 2'd1 : 2'd0;
+wire req_lock = sel_uncache_rd && uncache_ll;
 
 wire rd_addr_hs = arvalid && arready;
 wire rd_data_hs = rvalid && rready;
@@ -443,6 +457,7 @@ always @(posedge clk) begin
         rd_len_r    <= 8'b0;
         rd_addr_r   <= 32'b0;
         rd_size_r   <= 2'b0;
+        rd_lock_r   <= 1'b0;
         wr_data_r   <= 128'b0;
         wr_strb_r   <= 4'b0;
         wr_addr_r   <= 32'b0;
@@ -450,6 +465,7 @@ always @(posedge clk) begin
         wr_len_r    <= 8'b0;
         wr_cnt      <= 2'b0;
         wr_is_uncache <= 1'b0;
+        wr_lock_r   <= 1'b0;
     end
     else begin
         case (state)
@@ -462,6 +478,7 @@ always @(posedge clk) begin
                 wr_size_r     <= sel_uncache_wr ? uncache_size  : 2'b10;
                 wr_len_r      <= sel_uncache_wr ? 8'd0 : 8'd3;
                 wr_is_uncache <= sel_uncache_wr;
+                wr_lock_r     <= sel_uncache_wr && uncache_sc;
                 state         <= ST_WR_ADDR;
             end
             else if (sel_rd) begin
@@ -469,6 +486,7 @@ always @(posedge clk) begin
                 rd_size_r   <= req_size;
                 rd_len_r    <= req_len;
                 rd_source   <= req_source;
+                rd_lock_r   <= req_lock;
                 state       <= ST_RD_ADDR;
             end
         end
@@ -514,7 +532,7 @@ assign araddr   = rd_addr_r;
 assign arlen    = rd_len_r;
 assign arsize   = {1'b0, rd_size_r};
 assign arburst  = 2'b01;
-assign arlock   = 2'b00;
+assign arlock   = rd_lock_r ? 2'b01 : 2'b00;
 assign arcache  = 4'b0000;
 assign arprot   = 3'b000;
 assign arvalid  = (state == ST_RD_ADDR);
@@ -525,7 +543,7 @@ assign awaddr   = wr_addr_r;
 assign awlen    = wr_len_r;
 assign awsize   = {1'b0, wr_size_r};
 assign awburst  = 2'b01;
-assign awlock   = 2'b00;
+assign awlock   = wr_lock_r ? 2'b01 : 2'b00;
 assign awcache  = 4'b0000;
 assign awprot   = 3'b000;
 assign awvalid  = (state == ST_WR_ADDR);
@@ -543,7 +561,8 @@ assign bready   = (state == ST_WR_RESP);
 assign uncache_addr_ok  = (state == ST_IDLE) && uncache_req;
 assign uncache_data_ok  = ((state == ST_RD_RESP) && (rd_source == 2'd2) && rd_data_hs)
                         || ((state == ST_WR_RESP) && wr_is_uncache && wr_resp_hs);
-assign uncache_rdata    = rdata;
+assign uncache_rdata    = wr_is_uncache ? {31'b0, wr_lock_r ? (bresp == 2'b01) : 1'b1}
+                                        : rdata;
 
 assign dcache_wr_rdy    = (state == ST_IDLE) && sel_dcache_wr;
 assign dcache_rd_rdy    = (state == ST_IDLE) && sel_dcache_rd;
@@ -581,6 +600,8 @@ module mycpu_core(
     output [31:0] data_sram_addr,
     output [31:0] data_sram_wdata,
     output        data_sram_uncached,
+    output        data_sram_ll,
+    output        data_sram_sc,
     input         data_sram_addr_ok,
     input         data_sram_data_ok,
     input  [31:0] data_sram_rdata,
@@ -754,6 +775,8 @@ exe_stage exe_stage(
     .data_sram_addr   (data_sram_addr  ),
     .data_sram_wdata  (data_sram_wdata ),
     .data_sram_uncached(data_sram_uncached),
+    .data_sram_ll     (data_sram_ll    ),
+    .data_sram_sc     (data_sram_sc    ),
     .data_sram_addr_ok(data_sram_addr_ok),
     .data_sram_data_ok(data_sram_data_ok),
     .data_sram_rdata  (data_sram_rdata ),

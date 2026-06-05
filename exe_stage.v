@@ -20,6 +20,8 @@ module exe_stage(
     output [31:0] data_sram_addr   ,
     output [31:0] data_sram_wdata  ,
     output        data_sram_uncached,
+    output        data_sram_ll      ,
+    output        data_sram_sc      ,
     input         data_sram_addr_ok,
     input         data_sram_data_ok,
     input  [31:0] data_sram_rdata  ,
@@ -73,6 +75,8 @@ wire [ 2:0] tlb_op;
 wire [ 4:0] invtlb_op;
 wire        inst_cacop;
 wire [ 4:0] cacop_code;
+wire        inst_ll_w;
+wire        inst_sc_w;
 
 wire [18:0] alu_op      ;
 wire        es_load_op;
@@ -94,17 +98,18 @@ wire [13:0] csr_num;
 wire        inst_syscall;
 wire        inst_ertn;
 
-assign {ds_ex,              // 1  (198)
-        ds_ecode,           // 6  (197:192)
-        ds_esubcode,        // 9  (191:183)
-        ds_rdcntv,          // 1  (182)
-        ds_rdcntv_hi,       // 1  (181)
-        ds_rdcntid,         // 1  (180)
-        tlb_op,
-        invtlb_op,
-        inst_cacop,
-        cacop_code,
-        // original 180-bit payload
+assign {ds_ex,              // 1  (214)
+        ds_ecode,           // 6  (213:208)
+        ds_esubcode,        // 9  (207:199)
+        ds_rdcntv,          // 1  (198)
+        ds_rdcntv_hi,       // 1  (197)
+        ds_rdcntid,         // 1  (196)
+        tlb_op,             // 3  (195:193)
+        invtlb_op,          // 5  (192:188)
+        inst_cacop,         // 1  (187)
+        cacop_code,         // 5  (186:182)
+        inst_ll_w,          // 1  (181)
+        inst_sc_w,          // 1  (180)
         alu_op,             // 19 (179:161)
         es_load_op,         // 1  (160)
         mem_size,           // 2  (159:158)
@@ -140,6 +145,12 @@ wire        div_done   ;
 wire [31:0] div_quotient;
 wire [31:0] div_remainder;
 wire [31:0] div_result ;
+reg         llbit;
+reg  [31:0] lladdr;
+wire        sc_success;
+wire        es_mem_we_eff;
+wire        lladdr_match;
+wire        sc_bus_result;
 
 // ============================================================
 // ALU
@@ -147,6 +158,10 @@ wire [31:0] div_result ;
 assign alu_src1 = src1_is_pc  ? es_pc  : rj_value;
 assign alu_src2 = src2_is_imm ? imm : rkd_value;
 assign mem_addr = rj_value + imm;
+assign lladdr_match = (data_paddr[31:4] == lladdr[31:4]);
+assign sc_success   = inst_sc_w && (llbit == 1'b1) && lladdr_match;
+assign es_mem_we_eff = es_mem_we && (!inst_sc_w || sc_success);
+assign sc_bus_result = inst_sc_w && sc_success && data_sram_uncached;
 assign div_op     = !ds_ex && (alu_op[12] || alu_op[16] || alu_op[17] || alu_op[18]);
 assign div_signed = alu_op[12] || alu_op[16];
 assign div_is_mod = alu_op[16] || alu_op[18];
@@ -465,14 +480,14 @@ wire [ 1:0] data_mat = !csr_pg       ? csr_crmd[8:7] :
                        data_dmw1_hit ? csr_dmw1[5:4] :
                                        s1_mat;
 wire cacop_hit_op = inst_cacop && (cacop_code[4:3] == 2'b10);
-wire data_mem_op  = es_load_op || es_mem_we || cacop_hit_op;
+wire data_mem_op  = es_load_op || es_mem_we_eff || cacop_hit_op;
 wire data_use_tlb = csr_pg && !data_dmw_hit;
 wire data_tlbr_ex = es_valid && data_mem_op && data_use_tlb && !s1_found;
 wire data_pil_ex  = es_valid && (es_load_op || cacop_hit_op) && data_use_tlb && s1_found && !s1_v;
-wire data_pis_ex  = es_valid && es_mem_we  && data_use_tlb && s1_found && !s1_v;
+wire data_pis_ex  = es_valid && es_mem_we_eff  && data_use_tlb && s1_found && !s1_v;
 wire data_ppi_ex  = es_valid && data_mem_op && data_use_tlb && s1_found && s1_v
                     && (csr_plv > s1_plv);
-wire data_pme_ex  = es_valid && es_mem_we && data_use_tlb && s1_found && s1_v
+wire data_pme_ex  = es_valid && es_mem_we_eff && data_use_tlb && s1_found && s1_v
                     && (csr_plv <= s1_plv) && !s1_d;
 wire data_tlb_ex  = data_tlbr_ex || data_pil_ex || data_pis_ex || data_ppi_ex || data_pme_ex;
 
@@ -480,7 +495,7 @@ wire data_tlb_ex  = data_tlbr_ex || data_pil_ex || data_pis_ex || data_ppi_ex ||
 // ALE detection (address alignment error)
 // ============================================================
 wire ale_ld = es_load_op;
-wire ale_st = es_mem_we;
+wire ale_st = es_mem_we_eff;
 
 wire ale_w = (ale_ld || ale_st) && (mem_size == 2'b10);  // word access
 wire ale_h = (ale_ld || ale_st) && (mem_size == 2'b01);  // halfword access
@@ -595,7 +610,9 @@ always @(*) begin
         exe_result = csr_rvalue;
     else if (div_op === 1'b1)
         exe_result = div_result;
-    else if (res_from_mem === 1'b1 || es_mem_we === 1'b1)
+    else if (inst_sc_w === 1'b1)
+        exe_result = {31'b0, sc_success};
+    else if (res_from_mem === 1'b1 || es_mem_we_eff === 1'b1)
         exe_result = mem_addr;
     else
         exe_result = alu_result;
@@ -628,18 +645,20 @@ assign st_w_wdata = rkd_value;
 
 // Suppress memory access on exceptions.
 wire mem_access_ok = es_valid && !ex_pending;
-wire es_mem_access = (res_from_mem || es_mem_we) && mem_access_ok;
+wire es_mem_access = (res_from_mem || es_mem_we_eff) && mem_access_ok;
 
 assign data_sram_req    = es_valid && es_mem_access && ms_allowin;
-assign data_sram_wr     = es_mem_we && mem_access_ok;
+assign data_sram_wr     = es_mem_we_eff && mem_access_ok;
 assign data_sram_size   = mem_size;
-assign data_sram_wstrb  = es_mem_we && mem_access_ok ?
+assign data_sram_wstrb  = es_mem_we_eff && mem_access_ok ?
                             ((mem_size == 2'b00) ? st_b_we :
                              (mem_size == 2'b01) ? st_h_we : st_w_we) : 4'h0;
 assign data_sram_addr   = data_paddr;
 assign data_sram_wdata  = (mem_size == 2'b00) ? st_b_wdata :
                           (mem_size == 2'b01) ? st_h_wdata : st_w_wdata;
 assign data_sram_uncached = (data_mat == 2'b00);
+assign data_sram_ll    = inst_ll_w && mem_access_ok;
+assign data_sram_sc    = inst_sc_w && sc_success && mem_access_ok;
 
 // ============================================================
 // Cache maintenance interface
@@ -663,12 +682,33 @@ assign es_to_ms_valid = es_valid && es_ready_go;
 always @(posedge clk) begin
     if (reset) begin
         es_valid <= 1'b0;
+        llbit   <= 1'b0;
+        lladdr  <= 32'b0;
     end
     else if (flush || ertn_flush) begin
         es_valid <= 1'b0;
+        llbit   <= 1'b0;
+        lladdr  <= 32'b0;
     end
     else if (es_allowin) begin
         es_valid <= ds_to_es_valid;
+    end
+
+    if (!reset && !(flush || ertn_flush)) begin
+        if (wb_ex || ertn_flush) begin
+            llbit <= 1'b0;
+        end
+        else if (es_commit && !ex_pending && !ertn_pending) begin
+            if (inst_ll_w) begin
+                llbit <= 1'b1;
+                lladdr <= data_paddr;
+            end
+            else if (inst_sc_w ||
+                     cacop_valid ||
+                     (es_mem_we && llbit && lladdr_match)) begin
+                llbit <= 1'b0;
+            end
+        end
     end
 
     if (ds_to_es_valid && es_allowin && !flush && !ertn_flush) begin
@@ -679,7 +719,8 @@ end
 // ============================================================
 // Bus output
 // ============================================================
-assign es_to_ms_bus = {es_mem_access, //74:74 1
+assign es_to_ms_bus = {sc_bus_result, //75:75 1
+                       es_mem_access, //74:74 1
                        res_from_mem,  //73:73 1
                        mem_size    ,  //72:71 2
                        mem_unsigned,  //70:70 1
