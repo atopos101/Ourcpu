@@ -39,7 +39,6 @@ reg [`ES_TO_MS_BUS_WD -1:0] es_to_ms_bus_r;
 
 wire        ms_res_from_mem;
 wire        ms_mem_access;
-wire        ms_sc_bus_result;
 wire [1:0]  ms_mem_size;
 wire        ms_mem_unsigned;
 wire        ms_gr_we;
@@ -48,7 +47,6 @@ wire [31:0] ms_alu_result;
 wire [31:0] ms_pc;
 
 assign {
-        ms_sc_bus_result, //75
         ms_mem_access,   //74
         ms_res_from_mem, //73
         ms_mem_size,     //72:71
@@ -142,10 +140,7 @@ assign mem_result =
 wire [31:0] ms_final_result;
 
 assign ms_final_result =
-       ms_sc_bus_result
-    ? {31'b0, data_sram_rdata[0]}
-
-    : ms_res_from_mem
+       ms_res_from_mem
     ? mem_result
     : ms_alu_result;
 

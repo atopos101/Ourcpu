@@ -197,9 +197,9 @@ always @(posedge clk) begin
         refill_cnt <= 2'b00;
         cacop_ok   <= 1'b0;
         for (i = 0; i < 256; i = i + 1) begin
-            d_table[0][i] <= 1'b0;
-            d_table[1][i] <= 1'b0;
-            lru[i]        <= 1'b0;
+            d_table[0][i] = 1'b0;
+            d_table[1][i] = 1'b0;
+            lru[i]        = 1'b0;
         end
     end
     else begin

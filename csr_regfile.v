@@ -38,13 +38,13 @@ module csr_regfile(
     output [31:0] csr_tlbelo0,
     output [31:0] csr_tlbelo1,
     output [ 9:0] csr_asid,
-    output [ 3:0] csr_tlbidx_index,
+    output [ 4:0] csr_tlbidx_index,
     output [ 5:0] csr_tlbidx_ps,
     output        csr_tlbidx_ne,
     // TLB instruction side effects
     input         tlbsrch_en,
     input         tlbsrch_found,
-    input  [ 3:0] tlbsrch_index,
+    input  [ 4:0] tlbsrch_index,
     input         tlbrd_en,
     input         tlbrd_e,
     input  [18:0] tlbrd_vppn,
@@ -147,7 +147,7 @@ assign csr_tlbehi       = tlbehi;
 assign csr_tlbelo0      = tlbelo0;
 assign csr_tlbelo1      = tlbelo1;
 assign csr_asid         = asid;
-assign csr_tlbidx_index = tlbidx[3:0];
+assign csr_tlbidx_index = tlbidx[4:0];
 assign csr_tlbidx_ps    = tlbidx[29:24];
 assign csr_tlbidx_ne    = tlbidx[31];
 
@@ -310,7 +310,7 @@ always @(posedge clk) begin
                 CSR_ERA:    era    <= era_wdata;
                 CSR_BADV:   badv   <= badv_wdata;
                 CSR_EENTRY: eentry <= eentry_wdata;
-                CSR_TLBIDX: tlbidx <= tlbidx_wdata & 32'hbf00000f;
+                CSR_TLBIDX: tlbidx <= tlbidx_wdata & 32'hbf00001f;
                 CSR_TLBEHI: tlbehi <= tlbehi_wdata & 32'hffffe000;
                 CSR_TLBELO0:tlbelo0 <= tlbelo0_wdata & 32'h0fffffff;
                 CSR_TLBELO1:tlbelo1 <= tlbelo1_wdata & 32'h0fffffff;
@@ -342,7 +342,7 @@ always @(posedge clk) begin
 
         if (tlbsrch_en) begin
             if (tlbsrch_found) begin
-                tlbidx <= {28'b0, tlbsrch_index};
+                tlbidx <= {27'b0, tlbsrch_index};
             end
             else begin
                 tlbidx <= 32'h80000000;
@@ -351,14 +351,14 @@ always @(posedge clk) begin
 
         if (tlbrd_en) begin
             if (tlbrd_e) begin
-                tlbidx  <= {2'b0, tlbrd_ps, 20'b0, tlbidx[3:0]};
+                tlbidx  <= {2'b0, tlbrd_ps, 19'b0, tlbidx[4:0]};
                 tlbehi  <= {tlbrd_vppn, 13'b0};
                 tlbelo0 <= {4'b0, tlbrd_ppn0, 1'b0, tlbrd_g, tlbrd_mat0, tlbrd_plv0, tlbrd_d0, tlbrd_v0};
                 tlbelo1 <= {4'b0, tlbrd_ppn1, 1'b0, tlbrd_g, tlbrd_mat1, tlbrd_plv1, tlbrd_d1, tlbrd_v1};
                 asid    <= tlbrd_asid;
             end
             else begin
-                tlbidx  <= 32'h80000000 | {28'b0, tlbidx[3:0]};
+                tlbidx  <= 32'h80000000 | {27'b0, tlbidx[4:0]};
                 tlbehi  <= 32'b0;
                 tlbelo0 <= 32'b0;
                 tlbelo1 <= 32'b0;

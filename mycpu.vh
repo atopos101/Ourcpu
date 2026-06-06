@@ -3,8 +3,8 @@
 
 `define BR_BUS_WD       34
 `define FS_TO_DS_BUS_WD 80    // {inst[31:0], pc[31:0], fs_ex, fs_ecode, fs_esubcode}
-`define DS_TO_ES_BUS_WD 215   // previous fields + LL/SC flags
-`define ES_TO_MS_BUS_WD 76
+`define DS_TO_ES_BUS_WD 213   // previous fields + inst_cacop + cacop_code[4:0]
+`define ES_TO_MS_BUS_WD 75
 `define MS_TO_WS_BUS_WD 70    // unchanged
 `define WS_TO_RF_BUS_WD 38    // unchanged
 
