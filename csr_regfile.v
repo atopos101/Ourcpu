@@ -20,6 +20,10 @@ module csr_regfile(
     // ERTN interface
     input         ertn_flush,
     output [31:0] ertn_pc,
+    // LL/SC control
+    input         reservation_valid,
+    output        llbctl_klo,
+    output        wcllb_commit,
     // interrupt interface
     input  [7:0]  hw_int_in,
     output        has_int,
@@ -86,6 +90,7 @@ localparam CSR_TID    = 14'h40;
 localparam CSR_TCFG   = 14'h41;
 localparam CSR_TVAL   = 14'h42;
 localparam CSR_TICLR  = 14'h44;
+localparam CSR_LLBCTL = 14'h60;
 localparam CSR_TLBRENTRY = 14'h88;
 localparam CSR_DMW0   = 14'h180;
 localparam CSR_DMW1   = 14'h181;
@@ -112,6 +117,7 @@ reg [31:0] save3;
 reg [31:0] tid;
 reg [31:0] tcfg;
 reg [31:0] tval;
+reg        llbctl_klo_r;
 reg [31:0] tlbrentry;
 reg [31:0] dmw0;
 reg [31:0] dmw1;
@@ -139,6 +145,7 @@ wire        timer_will_expire = timer_en && (tval == 32'h1);
 // ============================================================
 assign ex_entry = (wb_ecode == `ECODE_TLBR) ? tlbrentry : eentry;
 assign ertn_pc  = era;
+assign llbctl_klo = llbctl_klo_r;
 assign csr_crmd         = crmd;
 assign csr_dmw0         = dmw0;
 assign csr_dmw1         = dmw1;
@@ -150,6 +157,8 @@ assign csr_asid         = asid;
 assign csr_tlbidx_index = tlbidx[4:0];
 assign csr_tlbidx_ps    = tlbidx[29:24];
 assign csr_tlbidx_ne    = tlbidx[31];
+assign wcllb_commit = csr_inst_we && (csr_num == CSR_LLBCTL) &&
+                      csr_wmask[1] && csr_wvalue[1];
 
 // ============================================================
 // Interrupt logic
@@ -200,6 +209,8 @@ always @(*) begin
             CSR_TCFG:   csr_rvalue_reg = tcfg;
             CSR_TVAL:   csr_rvalue_reg = tval;
             CSR_TICLR:  csr_rvalue_reg = 32'b0;  // write-only, reads as 0
+            CSR_LLBCTL: csr_rvalue_reg = {29'b0, llbctl_klo_r, 1'b0,
+                                          reservation_valid};
             CSR_TLBRENTRY: csr_rvalue_reg = tlbrentry;
             CSR_DMW0:   csr_rvalue_reg = dmw0;
             CSR_DMW1:   csr_rvalue_reg = dmw1;
@@ -268,6 +279,7 @@ always @(posedge clk) begin
         tid    <= 32'b0;
         tcfg   <= 32'b0;
         tval   <= 32'b0;
+        llbctl_klo_r <= 1'b0;
         tlbrentry <= 32'b0;
         dmw0   <= 32'b0;
         dmw1   <= 32'b0;
@@ -333,6 +345,11 @@ always @(posedge clk) begin
                     end
                 end
                 CSR_TICLR:  ; // write-only, handled above via timer_pending clear
+                CSR_LLBCTL: begin
+                    if (csr_wmask[2]) begin
+                        llbctl_klo_r <= csr_wvalue[2];
+                    end
+                end
                 CSR_TLBRENTRY: tlbrentry <= tlbrentry_wdata;
                 CSR_DMW0:   dmw0 <= dmw0_wdata & 32'hee000039;
                 CSR_DMW1:   dmw1 <= dmw1_wdata & 32'hee000039;
@@ -405,6 +422,7 @@ always @(posedge clk) begin
         if (ertn_flush) begin
             crmd[1:0] <= prmd[1:0];
             crmd[2]   <= prmd[2];
+            llbctl_klo_r <= 1'b0;
             if (estat[21:16] == `ECODE_TLBR) begin
                 crmd[3] <= 1'b0;
                 crmd[4] <= 1'b1;

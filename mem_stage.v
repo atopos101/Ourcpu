@@ -21,6 +21,12 @@ module mem_stage(
     input                          data_sram_data_ok,
     input  [31:0]                  data_sram_rdata,
 
+    // LL/SC retirement events
+    output                         ll_commit_valid,
+    output                         sc_commit_valid,
+    output                         local_store_commit_valid,
+    output [27:0]                  mem_commit_line,
+
     // forward
     output [4:0]                   ms_to_ds_dest,
     output                         ms_to_ds_load_op,
@@ -39,6 +45,11 @@ reg [`ES_TO_MS_BUS_WD -1:0] es_to_ms_bus_r;
 
 wire        ms_res_from_mem;
 wire        ms_mem_access;
+wire        ms_inst_ll_w;
+wire        ms_inst_sc_w;
+wire        ms_sc_success;
+wire        ms_access_cached;
+wire [27:0] ms_mem_line;
 wire [1:0]  ms_mem_size;
 wire        ms_mem_unsigned;
 wire        ms_gr_we;
@@ -47,6 +58,11 @@ wire [31:0] ms_alu_result;
 wire [31:0] ms_pc;
 
 assign {
+        ms_inst_ll_w,
+        ms_inst_sc_w,
+        ms_sc_success,
+        ms_access_cached,
+        ms_mem_line,
         ms_mem_access,   //74
         ms_res_from_mem, //73
         ms_mem_size,     //72:71
@@ -140,9 +156,19 @@ assign mem_result =
 wire [31:0] ms_final_result;
 
 assign ms_final_result =
-       ms_res_from_mem
+       ms_inst_sc_w
+    ? {31'b0, ms_sc_success}
+    :  ms_res_from_mem
     ? mem_result
     : ms_alu_result;
+
+wire ms_commit = ms_valid && ms_ready_go && ws_allowin;
+
+assign ll_commit_valid = ms_commit && ms_inst_ll_w && ms_access_cached;
+assign sc_commit_valid = ms_commit && ms_inst_sc_w;
+assign local_store_commit_valid = ms_commit && ms_mem_access &&
+                                  !ms_res_from_mem && !ms_inst_sc_w;
+assign mem_commit_line = ms_mem_line;
 
 //==========================================================
 // to ws
@@ -170,7 +196,7 @@ assign ms_to_ds_dest =
     & {5{ms_to_ws_valid}}
     & {5{ms_gr_we}};
 
-assign ms_to_ds_load_op = ms_valid && ms_res_from_mem && !ms_ready_go;
+assign ms_to_ds_load_op = ms_valid && (ms_res_from_mem || ms_inst_sc_w) && !ms_ready_go;
 assign ms_to_ds_load_dest = ms_dest;
 
 assign ms_to_ds_result = ms_final_result;

@@ -99,6 +99,20 @@ wire [19:0] core_cacop_tag;
 wire        core_cacop_ok;
 wire        icache_cacop_ok;
 wire        dcache_cacop_ok;
+wire        icache_idle;
+wire        dcache_idle;
+
+wire        core_barrier_req;
+wire        core_barrier_is_ibar;
+wire        core_barrier_done;
+wire        barrier_busy;
+wire        barrier_dcache_valid;
+wire [ 7:0] barrier_dcache_index;
+wire        barrier_dcache_way;
+wire        barrier_icache_valid;
+wire [ 7:0] barrier_icache_index;
+wire        barrier_icache_way;
+wire        bridge_data_busy;
 
 wire        dcache_addr_ok;
 wire        dcache_data_ok;
@@ -116,6 +130,8 @@ wire [31:0] dcache_wr_addr;
 wire [ 3:0] dcache_wr_wstrb;
 wire [127:0] dcache_wr_data;
 wire        dcache_wr_rdy;
+wire        dcache_line_inv_valid;
+wire [27:0] dcache_line_inv_addr;
 
 wire        uncache_req;
 wire        uncache_wr;
@@ -157,6 +173,11 @@ mycpu_core u_core(
     .cacop_way          (core_cacop_way      ),
     .cacop_tag          (core_cacop_tag      ),
     .cacop_ok           (core_cacop_ok       ),
+    .barrier_req        (core_barrier_req    ),
+    .barrier_is_ibar    (core_barrier_is_ibar),
+    .barrier_done       (core_barrier_done   ),
+    .dcache_inv_valid   (dcache_line_inv_valid),
+    .dcache_inv_line    (dcache_line_inv_addr),
     .debug_wb_pc        (debug0_wb_pc        ),
     .debug_wb_rf_we     (debug0_wb_rf_wen    ),
     .debug_wb_rf_wnum   (debug0_wb_rf_wnum   ),
@@ -170,19 +191,40 @@ assign rf_rdata = (reg_num == 5'b0) ? 32'b0
 assign core_data_addr_ok = core_data_uncached ? uncache_addr_ok : dcache_addr_ok;
 assign core_data_data_ok = uncache_data_ok || dcache_data_ok;
 assign core_data_rdata   = uncache_data_ok ? uncache_rdata : dcache_rdata;
-assign core_cacop_ok     = core_cacop_is_dcache ? dcache_cacop_ok : icache_cacop_ok;
+assign core_cacop_ok     = core_cacop_valid ?
+                           (core_cacop_is_dcache ? dcache_cacop_ok : icache_cacop_ok) :
+                           1'b0;
 
-assign uncache_req   = core_data_req && core_data_uncached;
+assign uncache_req   = core_data_req && core_data_uncached && !barrier_busy;
 assign uncache_wr    = core_data_wr;
 assign uncache_size  = core_data_size;
 assign uncache_wstrb = core_data_wstrb;
 assign uncache_addr  = core_data_addr;
 assign uncache_wdata = core_data_wdata;
 
+barrier_ctrl u_barrier_ctrl(
+    .clk                  (aclk                  ),
+    .reset                (!aresetn              ),
+    .barrier_req          (core_barrier_req      ),
+    .barrier_is_ibar      (core_barrier_is_ibar  ),
+    .barrier_done         (core_barrier_done     ),
+    .barrier_busy         (barrier_busy          ),
+    .data_side_idle       (dcache_idle && !bridge_data_busy && !uncache_req),
+    .icache_idle          (icache_idle           ),
+    .dcache_maint_valid   (barrier_dcache_valid  ),
+    .dcache_maint_index   (barrier_dcache_index  ),
+    .dcache_maint_way     (barrier_dcache_way    ),
+    .dcache_maint_ok      (dcache_cacop_ok       ),
+    .icache_maint_valid   (barrier_icache_valid  ),
+    .icache_maint_index   (barrier_icache_index  ),
+    .icache_maint_way     (barrier_icache_way    ),
+    .icache_maint_ok      (icache_cacop_ok       )
+);
+
 icache u_icache(
     .clk                (aclk                ),
     .resetn             (aresetn             ),
-    .valid              (core_inst_req       ),
+    .valid              (core_inst_req && !barrier_busy),
     .op                 (1'b0                ),
     .index              (core_inst_addr[11:4]),
     .tag                (core_inst_addr[31:12]),
@@ -192,12 +234,14 @@ icache u_icache(
     .addr_ok            (core_inst_addr_ok   ),
     .data_ok            (core_inst_data_ok   ),
     .rdata              (core_inst_rdata     ),
-    .cacop_valid        (core_cacop_valid && !core_cacop_is_dcache),
-    .cacop_op           (core_cacop_op       ),
-    .cacop_index        (core_cacop_index    ),
-    .cacop_way          (core_cacop_way      ),
-    .cacop_tag          (core_cacop_tag      ),
+    .cacop_valid        (barrier_icache_valid ||
+                         (core_cacop_valid && !core_cacop_is_dcache)),
+    .cacop_op           (barrier_icache_valid ? 2'b00 : core_cacop_op),
+    .cacop_index        (barrier_icache_valid ? barrier_icache_index : core_cacop_index),
+    .cacop_way          (barrier_icache_valid ? barrier_icache_way : core_cacop_way),
+    .cacop_tag          (barrier_icache_valid ? 20'b0 : core_cacop_tag),
     .cacop_ok           (icache_cacop_ok     ),
+    .idle               (icache_idle         ),
     .rd_req             (icache_rd_req       ),
     .rd_type            (icache_rd_type      ),
     .rd_addr            (icache_rd_addr      ),
@@ -216,7 +260,7 @@ icache u_icache(
 dcache u_dcache(
     .clk                (aclk                ),
     .resetn             (aresetn             ),
-    .valid              (core_data_req && !core_data_uncached),
+    .valid              (core_data_req && !core_data_uncached && !barrier_busy),
     .op                 (core_data_wr        ),
     .index              (core_data_addr[11:4]),
     .tag                (core_data_addr[31:12]),
@@ -226,12 +270,17 @@ dcache u_dcache(
     .addr_ok            (dcache_addr_ok      ),
     .data_ok            (dcache_data_ok      ),
     .rdata              (dcache_rdata        ),
-    .cacop_valid        (core_cacop_valid && core_cacop_is_dcache),
-    .cacop_op           (core_cacop_op       ),
-    .cacop_index        (core_cacop_index    ),
-    .cacop_way          (core_cacop_way      ),
-    .cacop_tag          (core_cacop_tag      ),
+    .cacop_valid        (barrier_dcache_valid ||
+                         (core_cacop_valid && core_cacop_is_dcache)),
+    .cacop_op           (barrier_dcache_valid ? 2'b01 : core_cacop_op),
+    .cacop_index        (barrier_dcache_valid ? barrier_dcache_index : core_cacop_index),
+    .cacop_way          (barrier_dcache_valid ? barrier_dcache_way : core_cacop_way),
+    .cacop_tag          (barrier_dcache_valid ? 20'b0 : core_cacop_tag),
+    .cacop_clean_only   (barrier_dcache_valid),
     .cacop_ok           (dcache_cacop_ok     ),
+    .idle               (dcache_idle         ),
+    .line_inv_valid     (dcache_line_inv_valid),
+    .line_inv_addr      (dcache_line_inv_addr),
     .rd_req             (dcache_rd_req       ),
     .rd_type            (dcache_rd_type      ),
     .rd_addr            (dcache_rd_addr      ),
@@ -279,6 +328,7 @@ sram_axi_bridge_2x1 u_sram_axi_bridge(
     .uncache_addr_ok    (uncache_addr_ok     ),
     .uncache_data_ok    (uncache_data_ok     ),
     .uncache_rdata      (uncache_rdata       ),
+    .data_busy          (bridge_data_busy    ),
     .arid               (arid                ),
     .araddr             (araddr              ),
     .arlen              (arlen               ),
@@ -355,6 +405,7 @@ module sram_axi_bridge_2x1(
     output        uncache_addr_ok,
     output        uncache_data_ok,
     output [31:0] uncache_rdata,
+    output        data_busy,
 
     output [ 3:0] arid,
     output [31:0] araddr,
@@ -558,6 +609,12 @@ assign icache_ret_valid = (state == ST_RD_RESP) && (rd_source == 2'd0) && rd_dat
 assign icache_ret_last  = icache_ret_valid && rlast;
 assign icache_ret_data  = rdata;
 
+assign data_busy = (state == ST_WR_ADDR) ||
+                   (state == ST_WR_DATA) ||
+                   (state == ST_WR_RESP) ||
+                   (((state == ST_RD_ADDR) || (state == ST_RD_RESP)) &&
+                    (rd_source != 2'd0));
+
 endmodule
 
 module mycpu_core(
@@ -594,6 +651,11 @@ module mycpu_core(
     output        cacop_way,
     output [19:0] cacop_tag,
     input         cacop_ok,
+    output        barrier_req,
+    output        barrier_is_ibar,
+    input         barrier_done,
+    input         dcache_inv_valid,
+    input  [27:0] dcache_inv_line,
     // trace debug interface
     output [31:0] debug_wb_pc,
     output [ 3:0] debug_wb_rf_we,
@@ -648,10 +710,27 @@ wire [31:0] ex_entry;
 wire        ertn_flush;
 wire [31:0] ertn_pc;
 
+wire        ibar_flush;
+wire [31:0] ibar_target;
+wire        idle_wait;
+
 // csr hazard tracking
 wire        es_csr_we;
 wire [13:0] es_csr_num;
 wire        es_is_ertn;
+
+// LL/SC reservation state and retirement events
+wire [27:0] sc_query_line;
+wire        sc_query_cached;
+wire        sc_can_store;
+wire        reservation_current;
+wire        reservation_valid;
+wire        llbctl_klo;
+wire        wcllb_commit;
+wire        ll_commit_valid;
+wire        sc_commit_valid;
+wire        local_store_commit_valid;
+wire [27:0] mem_commit_line;
 
 wire [7:0] hw_int_in_safe;
 assign hw_int_in_safe = {
@@ -664,6 +743,28 @@ assign hw_int_in_safe = {
     (hw_int_in[1] === 1'b1),
     (hw_int_in[0] === 1'b1)
 };
+
+llsc_unit u_llsc_unit(
+    .clk                     (clk                     ),
+    .reset                   (reset                   ),
+    .ll_commit_valid         (ll_commit_valid         ),
+    .ll_commit_line          (mem_commit_line         ),
+    .sc_commit_valid         (sc_commit_valid         ),
+    .local_store_commit_valid(local_store_commit_valid),
+    .local_store_commit_line (mem_commit_line         ),
+    .dcache_inv_valid        (dcache_inv_valid        ),
+    .dcache_inv_line         (dcache_inv_line         ),
+    .external_store_valid    (1'b0                    ),
+    .external_store_line     (28'b0                   ),
+    .wcllb_commit            (wcllb_commit            ),
+    .ertn_commit             (ertn_flush              ),
+    .llbctl_klo              (llbctl_klo              ),
+    .sc_query_line           (sc_query_line           ),
+    .sc_query_cached         (sc_query_cached         ),
+    .sc_can_store            (sc_can_store            ),
+    .reservation_current     (reservation_current     ),
+    .reservation_valid       (reservation_valid       )
+);
 
 // IF stage
 if_stage if_stage(
@@ -679,6 +780,9 @@ if_stage if_stage(
     // ertn
     .ertn_flush     (ertn_flush     ),
     .ertn_pc        (ertn_pc        ),
+    .ibar_flush     (ibar_flush     ),
+    .ibar_target    (ibar_target    ),
+    .idle_wait      (idle_wait      ),
     // address translation
     .inst_vaddr     (inst_vaddr     ),
     .inst_paddr     (inst_paddr     ),
@@ -705,6 +809,7 @@ id_stage id_stage(
     .clk            (clk            ),
     .reset          (reset          ),
     .flush          (flush          ),
+    .ibar_flush     (ibar_flush     ),
     //allowin
     .es_allowin     (es_allowin     ),
     .ds_allowin     (ds_allowin     ),
@@ -766,6 +871,12 @@ exe_stage exe_stage(
     .cacop_way        (cacop_way        ),
     .cacop_tag        (cacop_tag        ),
     .cacop_ok         (cacop_ok         ),
+    .barrier_req      (barrier_req      ),
+    .barrier_is_ibar  (barrier_is_ibar  ),
+    .barrier_done     (barrier_done     ),
+    .ibar_flush       (ibar_flush       ),
+    .ibar_target      (ibar_target      ),
+    .idle_wait        (idle_wait        ),
     // hazard detect info
     .es_to_ds_dest  (es_to_ds_dest  ),
     .es_to_ds_load_op(es_to_ds_load_op),
@@ -786,6 +897,12 @@ exe_stage exe_stage(
     .es_csr_we      (es_csr_we      ),
     .es_csr_num     (es_csr_num     ),
     .es_is_ertn     (es_is_ertn     ),
+    .sc_query_line  (sc_query_line  ),
+    .sc_query_cached(sc_query_cached),
+    .sc_can_store   (sc_can_store   ),
+    .reservation_valid(reservation_current),
+    .llbctl_klo     (llbctl_klo     ),
+    .wcllb_commit   (wcllb_commit   ),
     // interrupt / csr interface
     .hw_int_in      (hw_int_in_safe )
 );
@@ -806,6 +923,10 @@ mem_stage mem_stage(
     //from data-sram
     .data_sram_data_ok(data_sram_data_ok),
     .data_sram_rdata(data_sram_rdata),
+    .ll_commit_valid(ll_commit_valid),
+    .sc_commit_valid(sc_commit_valid),
+    .local_store_commit_valid(local_store_commit_valid),
+    .mem_commit_line(mem_commit_line),
     // hazard detect info
     .ms_to_ds_dest  (ms_to_ds_dest  ),
     .ms_to_ds_load_op(ms_to_ds_load_op),
@@ -872,6 +993,7 @@ reg        diff_ws_cntinst;
 reg [63:0] diff_ws_timer;
 reg        diff_ws_csr_rstat;
 reg [31:0] diff_ws_csr_data;
+reg [ 2:0] diff_ws_llbctl;
 
 reg        diff_commit_valid;
 reg [31:0] diff_commit_pc;
@@ -881,6 +1003,7 @@ reg [ 4:0] diff_commit_wdest;
 reg [31:0] diff_commit_wdata;
 reg        diff_commit_tlbfill;
 reg [ 4:0] diff_commit_tlbfill_index;
+reg [ 2:0] diff_commit_llbctl;
 reg        diff_commit_cntinst;
 reg [63:0] diff_commit_timer;
 reg        diff_commit_csr_rstat;
@@ -910,8 +1033,14 @@ wire       diff_is_st_h    = (diff_mem_opcode == 6'h0a) && (diff_mem_subop == 4'
 wire       diff_is_st_w    = (diff_mem_opcode == 6'h0a) && (diff_mem_subop == 4'h6);
 wire       diff_is_ld_bu   = (diff_mem_opcode == 6'h0a) && (diff_mem_subop == 4'h8);
 wire       diff_is_ld_hu   = (diff_mem_opcode == 6'h0a) && (diff_mem_subop == 4'h9);
-wire [7:0] diff_es_store_valid = {5'b0, diff_is_st_w, diff_is_st_h, diff_is_st_b};
-wire [7:0] diff_es_load_valid  = {3'b0, diff_is_ld_w, diff_is_ld_hu,
+wire       diff_is_ll_w    = diff_es_instr[31:24] == 8'h20;
+wire       diff_is_sc_w    = diff_es_instr[31:24] == 8'h21;
+wire       diff_es_idle    = (diff_es_instr[31:15] == 17'h0c91);
+wire       diff_ws_idle    = (diff_ws_instr[31:15] == 17'h0c91);
+wire [7:0] diff_es_store_valid = {5'b0,
+                                  diff_is_st_w || (diff_is_sc_w && exe_stage.sc_success),
+                                  diff_is_st_h, diff_is_st_b};
+wire [7:0] diff_es_load_valid  = {3'b0, diff_is_ld_w || diff_is_ll_w, diff_is_ld_hu,
                                   diff_is_ld_h, diff_is_ld_bu, diff_is_ld_b};
 wire       diff_excp_fire = diff_excp_pending &&
                             (!diff_excp_wait_commit || diff_commit_valid);
@@ -951,6 +1080,7 @@ always @(posedge clk) begin
         diff_ws_timer          <= 64'b0;
         diff_ws_csr_rstat      <= 1'b0;
         diff_ws_csr_data       <= 32'b0;
+        diff_ws_llbctl         <= 3'b0;
         diff_commit_valid      <= 1'b0;
         diff_commit_pc         <= 32'b0;
         diff_commit_instr      <= 32'b0;
@@ -959,6 +1089,7 @@ always @(posedge clk) begin
         diff_commit_wdata      <= 32'b0;
         diff_commit_tlbfill    <= 1'b0;
         diff_commit_tlbfill_index <= 5'b0;
+        diff_commit_llbctl     <= 3'b0;
         diff_commit_cntinst    <= 1'b0;
         diff_commit_timer      <= 64'b0;
         diff_commit_csr_rstat  <= 1'b0;
@@ -1023,9 +1154,15 @@ always @(posedge clk) begin
             diff_ws_timer         <= diff_ms_timer;
             diff_ws_csr_rstat     <= diff_ms_csr_rstat;
             diff_ws_csr_data      <= diff_ms_csr_data;
+            diff_ws_llbctl        <= {llbctl_klo, 1'b0,
+                                      reservation_valid};
         end
 
-        diff_commit_valid         <= wb_stage.ws_valid && !diff_ws_excp;
+        // IDLE retires before its wake-up interrupt is reported. Without this
+        // commit, the reference model takes the interrupt at the IDLE PC and
+        // observes ERA four bytes behind the DUT.
+        diff_commit_valid         <= wb_stage.ws_valid &&
+                                     (!diff_ws_excp || diff_ws_idle);
         diff_commit_pc            <= wb_stage.ws_pc;
         diff_commit_instr         <= diff_ws_instr;
         diff_commit_wen           <= wb_stage.rf_we;
@@ -1033,6 +1170,7 @@ always @(posedge clk) begin
         diff_commit_wdata         <= wb_stage.rf_wdata;
         diff_commit_tlbfill       <= diff_ws_tlbfill;
         diff_commit_tlbfill_index <= diff_ws_tlbfill_index;
+        diff_commit_llbctl        <= diff_ws_llbctl;
         diff_commit_cntinst       <= diff_ws_cntinst;
         diff_commit_timer         <= diff_ws_timer;
         diff_commit_csr_rstat     <= diff_ws_csr_rstat;
@@ -1041,7 +1179,7 @@ always @(posedge clk) begin
         diff_eret       <= 1'b0;
         if (exe_stage.wb_ex) begin
             diff_excp_pending     <= 1'b1;
-            diff_excp_wait_commit <= mem_stage.ms_valid;
+            diff_excp_wait_commit <= mem_stage.ms_valid || diff_es_idle;
             diff_excp_ecode       <= exe_stage.wb_ecode;
             diff_excp_pc          <= exe_stage.wb_pc;
             diff_excp_instr       <= diff_es_instr;
@@ -1149,7 +1287,7 @@ DifftestCSRRegState u_difftest_csr_state(
     .tcfg       ({32'b0, exe_stage.u_csr_regfile.tcfg}),
     .tval       ({32'b0, exe_stage.u_csr_regfile.tval}),
     .ticlr      (64'b0),
-    .llbctl     (64'b0),
+    .llbctl     ({61'b0, diff_commit_llbctl}),
     .tlbrentry  ({32'b0, exe_stage.u_csr_regfile.tlbrentry}),
     .dmw0       ({32'b0, exe_stage.u_csr_regfile.dmw0}),
     .dmw1       ({32'b0, exe_stage.u_csr_regfile.dmw1})

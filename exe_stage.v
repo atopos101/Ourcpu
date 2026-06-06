@@ -31,6 +31,13 @@ module exe_stage(
     output        cacop_way,
     output [19:0] cacop_tag,
     input         cacop_ok,
+    // memory barrier controller
+    output        barrier_req,
+    output        barrier_is_ibar,
+    input         barrier_done,
+    output        ibar_flush,
+    output [31:0] ibar_target,
+    output        idle_wait,
     // forward to id
     output [4:0] es_to_ds_dest,
     output es_to_ds_load_op,
@@ -51,6 +58,13 @@ module exe_stage(
     output        es_csr_we,
     output [13:0] es_csr_num,
     output        es_is_ertn,
+    // LL/SC reservation query and control
+    output [27:0] sc_query_line,
+    output        sc_query_cached,
+    input         sc_can_store,
+    input         reservation_valid,
+    output        llbctl_klo,
+    output        wcllb_commit,
     // interrupt / csr interface
     input  [7:0]  hw_int_in
 );
@@ -66,6 +80,11 @@ reg  [`DS_TO_ES_BUS_WD -1:0] ds_to_es_bus_r;
 wire        ds_ex;
 wire [ 5:0] ds_ecode;
 wire [ 8:0] ds_esubcode;
+wire        inst_ll_w;
+wire        inst_sc_w;
+wire        inst_dbar;
+wire        inst_ibar;
+wire        inst_idle;
 wire        ds_rdcntv;
 wire        ds_rdcntv_hi;
 wire        ds_rdcntid;
@@ -97,6 +116,11 @@ wire        inst_ertn;
 assign {ds_ex,              // 1  (198)
         ds_ecode,           // 6  (197:192)
         ds_esubcode,        // 9  (191:183)
+        inst_ll_w,
+        inst_sc_w,
+        inst_dbar,
+        inst_ibar,
+        inst_idle,
         ds_rdcntv,          // 1  (182)
         ds_rdcntv_hi,       // 1  (181)
         ds_rdcntid,         // 1  (180)
@@ -188,6 +212,7 @@ wire [31:0] csr_rvalue;
 wire [31:0] csr_wmask;
 wire [31:0] csr_wvalue;
 wire        has_int;
+wire        ex_int;
 wire        wb_ex;  // any exception (sync or int)
 reg  [5:0]  wb_ecode;
 reg  [8:0]  wb_esubcode;
@@ -205,7 +230,7 @@ assign ertn_pending = inst_ertn && es_valid && !ex_pending;
 assign csr_re       = is_csr && es_valid && !ex_pending && !ertn_pending;
 assign csr_wmask  = is_csrwr ? 32'hFFFFFFFF : rj_value;
 assign csr_wvalue = rkd_value;
-assign wb_pc      = es_pc;
+assign wb_pc      = (inst_idle && ex_int) ? (es_pc + 32'd4) : es_pc;
 
 // ============================================================
 // TLB instruction support
@@ -369,6 +394,9 @@ csr_regfile u_csr_regfile(
     .ex_entry   (ex_entry   ),
     .ertn_flush (ertn_flush ),
     .ertn_pc    (ertn_pc    ),
+    .reservation_valid(reservation_valid),
+    .llbctl_klo(llbctl_klo),
+    .wcllb_commit(wcllb_commit),
     .hw_int_in  (hw_int_in  ),
     .has_int    (has_int    ),
     .cnt_low    (cnt_low    ),
@@ -464,6 +492,9 @@ wire [ 1:0] data_mat = !csr_pg       ? csr_crmd[8:7] :
                        data_dmw0_hit ? csr_dmw0[5:4] :
                        data_dmw1_hit ? csr_dmw1[5:4] :
                                        s1_mat;
+wire data_access_cached = data_mat != 2'b00;
+assign sc_query_line   = data_paddr[31:4];
+assign sc_query_cached = data_access_cached;
 wire cacop_hit_op = inst_cacop && (cacop_code[4:3] == 2'b10);
 wire data_mem_op  = es_load_op || es_mem_we || cacop_hit_op;
 wire data_use_tlb = csr_pg && !data_dmw_hit;
@@ -510,12 +541,17 @@ wire ex_data_tlb = data_tlb_ex && !ex_ds && !ex_sys && !ex_ale;
 wire ex_sync  = ex_ds || ex_sys || ex_ale || ex_data_tlb;
 
 // Interrupt (asynchronous): only when no sync exception
-wire ex_int   = has_int && es_valid && !ex_sync;
+wire barrier_op = inst_dbar || inst_ibar;
+assign ex_int = has_int && es_valid && !ex_sync &&
+                !(barrier_op && !barrier_done);
 
 // Combined exception.  Side effects are committed only when ES can leave,
 // so older memory operations cannot be bypassed by a later exception.
 assign ex_pending = ex_sync || ex_int;
 assign wb_ex = es_commit && ex_pending;
+
+wire sc_success = inst_sc_w && sc_can_store && data_access_cached && !ex_pending;
+wire actual_mem_we = es_mem_we && (!inst_sc_w || sc_success);
 
 // ============================================================
 // Exception info for CSR
@@ -628,12 +664,12 @@ assign st_w_wdata = rkd_value;
 
 // Suppress memory access on exceptions.
 wire mem_access_ok = es_valid && !ex_pending;
-wire es_mem_access = (res_from_mem || es_mem_we) && mem_access_ok;
+wire es_mem_access = (res_from_mem || actual_mem_we) && mem_access_ok;
 
 assign data_sram_req    = es_valid && es_mem_access && ms_allowin;
-assign data_sram_wr     = es_mem_we && mem_access_ok;
+assign data_sram_wr     = actual_mem_we && mem_access_ok;
 assign data_sram_size   = mem_size;
-assign data_sram_wstrb  = es_mem_we && mem_access_ok ?
+assign data_sram_wstrb  = actual_mem_we && mem_access_ok ?
                             ((mem_size == 2'b00) ? st_b_we :
                              (mem_size == 2'b01) ? st_h_we : st_w_we) : 4'h0;
 assign data_sram_addr   = data_paddr;
@@ -651,11 +687,19 @@ assign cacop_index     = cacop_hit_op ? data_paddr[11:4] : data_vaddr[11:4];
 assign cacop_way       = data_vaddr[0];
 assign cacop_tag       = data_paddr[31:12];
 
+assign barrier_req     = es_valid && barrier_op && !ex_sync && !ertn_pending;
+assign barrier_is_ibar = inst_ibar;
+assign ibar_flush      = es_commit && inst_ibar && !ex_pending;
+assign ibar_target     = es_pc + 32'd4;
+assign idle_wait       = es_valid && inst_idle && !wb_ex;
+
 // ============================================================
 // Pipeline control
 // ============================================================
 assign es_ready_go    = div_op ? div_done :
                         inst_cacop ? (ex_pending || cacop_ok) :
+                        barrier_op ? (ex_pending || barrier_done) :
+                        inst_idle ? ex_pending :
                         (!es_mem_access || data_sram_addr_ok);
 assign es_allowin     = !es_valid || es_ready_go && ms_allowin;
 assign es_to_ms_valid = es_valid && es_ready_go;
@@ -664,14 +708,14 @@ always @(posedge clk) begin
     if (reset) begin
         es_valid <= 1'b0;
     end
-    else if (flush || ertn_flush) begin
+    else if (flush || ertn_flush || ibar_flush) begin
         es_valid <= 1'b0;
     end
     else if (es_allowin) begin
         es_valid <= ds_to_es_valid;
     end
 
-    if (ds_to_es_valid && es_allowin && !flush && !ertn_flush) begin
+    if (ds_to_es_valid && es_allowin && !flush && !ertn_flush && !ibar_flush) begin
         ds_to_es_bus_r <= ds_to_es_bus;
     end
 end
@@ -679,7 +723,12 @@ end
 // ============================================================
 // Bus output
 // ============================================================
-assign es_to_ms_bus = {es_mem_access, //74:74 1
+assign es_to_ms_bus = {inst_ll_w && !ex_pending && !ertn_pending,
+                       inst_sc_w && !ex_pending && !ertn_pending,
+                       sc_success,
+                       data_access_cached,
+                       data_paddr[31:4],
+                       es_mem_access, //74:74 1
                        res_from_mem,  //73:73 1
                        mem_size    ,  //72:71 2
                        mem_unsigned,  //70:70 1

@@ -21,7 +21,11 @@ module dcache (
     input  wire [ 7:0] cacop_index,
     input  wire        cacop_way,
     input  wire [19:0] cacop_tag,
+    input  wire        cacop_clean_only,
     output reg         cacop_ok,
+    output wire        idle,
+    output reg         line_inv_valid,
+    output reg  [27:0] line_inv_addr,
 
     output reg         rd_req,
     output wire [ 2:0] rd_type,
@@ -59,6 +63,7 @@ reg [ 3:0] req_wstrb;
 reg [31:0] req_wdata;
 reg [ 1:0] req_cacop_op;
 reg        req_cacop_way;
+reg        req_cacop_clean_only;
 
 wire [1:0] req_bank;
 assign req_bank = req_offset[3:2];
@@ -123,6 +128,12 @@ reg [1:0]  refill_cnt;
 wire [31:0] hit_word;
 assign hit_word = hit_way ? bank_rdata[1][req_bank] : bank_rdata[0][req_bank];
 
+wire victim_way = (!way0_v) ? 1'b0 :
+                  (!way1_v) ? 1'b1 :
+                              lru[req_index];
+wire victim_valid = victim_way ? way1_v : way0_v;
+wire [19:0] victim_tag = victim_way ? way1_tag : way0_tag;
+
 function [31:0] merge_word;
     input [31:0] old_word;
     input [31:0] new_word;
@@ -140,6 +151,7 @@ assign refill_word = (req_op && (refill_cnt == req_bank)) ?
                      merge_word(ret_data, req_wdata, req_wstrb) : ret_data;
 
 assign addr_ok = (state == S_IDLE) && valid && !cacop_valid;
+assign idle = (state == S_IDLE) && !rd_req && !wr_req;
 
 assign rd_type = REQ_READ_LINE;
 assign rd_addr = {req_tag, req_index, 4'b0000};
@@ -179,7 +191,7 @@ always @(*) begin
         end
     end
 
-    if (state == S_CACOP && cacop_target_valid) begin
+    if (state == S_CACOP && cacop_target_valid && !req_cacop_clean_only) begin
         tagv_we[cacop_target_way]    = 1'b1;
         tagv_wdata[cacop_target_way] = 21'b0;
     end
@@ -196,6 +208,9 @@ always @(posedge clk) begin
         rd_issued  <= 1'b0;
         refill_cnt <= 2'b00;
         cacop_ok   <= 1'b0;
+        req_cacop_clean_only <= 1'b0;
+        line_inv_valid <= 1'b0;
+        line_inv_addr  <= 28'b0;
         for (i = 0; i < 256; i = i + 1) begin
             d_table[0][i] = 1'b0;
             d_table[1][i] = 1'b0;
@@ -205,6 +220,7 @@ always @(posedge clk) begin
     else begin
         data_ok <= 1'b0;
         cacop_ok <= 1'b0;
+        line_inv_valid <= 1'b0;
 
         case (state)
         S_IDLE: begin
@@ -215,6 +231,7 @@ always @(posedge clk) begin
                 req_tag       <= cacop_tag;
                 req_cacop_op  <= cacop_op;
                 req_cacop_way <= cacop_way;
+                req_cacop_clean_only <= cacop_clean_only;
                 state         <= S_CACOP;
             end
             else if (valid) begin
@@ -241,12 +258,8 @@ always @(posedge clk) begin
                 state <= S_IDLE;
             end
             else begin
-                replace_way <= (!way0_v) ? 1'b0 :
-                               (!way1_v) ? 1'b1 :
-                                           lru[req_index];
-                replace_old_tag <= (!way0_v) ? way0_tag :
-                                   (!way1_v) ? way1_tag :
-                                   (lru[req_index] ? way1_tag : way0_tag);
+                replace_way <= victim_way;
+                replace_old_tag <= victim_tag;
                 replace_dirty <= (!way0_v) ? 1'b0 :
                                  (!way1_v) ? 1'b0 :
                                  (lru[req_index] ? d_table[1][req_index]
@@ -266,6 +279,10 @@ always @(posedge clk) begin
                 wr_issued  <= 1'b0;
                 rd_issued  <= 1'b0;
                 refill_cnt <= 2'b00;
+                if (victim_valid) begin
+                    line_inv_valid <= 1'b1;
+                    line_inv_addr  <= {victim_tag, req_index};
+                end
                 state      <= S_MISS;
             end
         end
@@ -326,6 +343,10 @@ always @(posedge clk) begin
             wr_req <= 1'b0;
             if (cacop_target_valid) begin
                 d_table[cacop_target_way][req_index] <= 1'b0;
+                if (!req_cacop_clean_only) begin
+                    line_inv_valid <= 1'b1;
+                    line_inv_addr  <= {cacop_target_tag, req_index};
+                end
             end
             if ((req_cacop_op != 2'b00) && cacop_target_valid && cacop_target_dirty) begin
                 replace_way     <= cacop_target_way;

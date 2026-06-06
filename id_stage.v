@@ -4,6 +4,7 @@ module id_stage(
     input                          clk           ,
     input                          reset         ,
     input                          flush         ,
+    input                          ibar_flush    ,
     //allowin
     input                          es_allowin    ,
     output                         ds_allowin    ,
@@ -79,6 +80,7 @@ wire [11:0] i12;
 wire [19:0] i20;
 wire [15:0] i16;
 wire [25:0] i26;
+wire [13:0] si14;
 
 wire [63:0] op_31_26_d;
 wire [15:0] op_25_22_d;
@@ -105,6 +107,11 @@ wire        inst_ld_hu;
 wire        inst_st_b;
 wire        inst_st_h;
 wire        inst_st_w;
+wire        inst_ll_w;
+wire        inst_sc_w;
+wire        inst_dbar;
+wire        inst_ibar;
+wire        inst_idle;
 wire        inst_jirl;
 wire        inst_b;
 wire        inst_bl;
@@ -184,6 +191,7 @@ assign i12  = ds_inst[21:10];
 assign i20  = ds_inst[24: 5];
 assign i16  = ds_inst[25:10];
 assign i26  = {ds_inst[ 9: 0], ds_inst[25:10]};
+assign si14 = ds_inst[23:10];
 
 decoder_6_64 u_dec0(.in(op_31_26 ), .out(op_31_26_d ));
 decoder_4_16 u_dec1(.in(op_25_22 ), .out(op_25_22_d ));
@@ -242,6 +250,18 @@ assign inst_st_h  = op_31_26_d[6'h0a] & op_25_22_d[4'h5];
 assign inst_st_w  = op_31_26_d[6'h0a] & op_25_22_d[4'h6];
 assign inst_ld_bu = op_31_26_d[6'h0a] & op_25_22_d[4'h8];
 assign inst_ld_hu = op_31_26_d[6'h0a] & op_25_22_d[4'h9];
+assign inst_ll_w  = ds_inst[31:24] == 8'h20;
+assign inst_sc_w  = ds_inst[31:24] == 8'h21;
+
+// Barrier instructions: fixed bits [31:15], hint in [14:0].
+assign inst_dbar = op_31_26_d[6'h0e] & op_25_22_d[4'h1] &
+                   op_21_20_d[2'h3]  & op_19_15_d[5'h04];
+assign inst_ibar = op_31_26_d[6'h0e] & op_25_22_d[4'h1] &
+                   op_21_20_d[2'h3]  & op_19_15_d[5'h05];
+
+// IDLE level: fixed bits [31:15] = 17'b00000110010010001.
+assign inst_idle = op_31_26_d[6'h01] & op_25_22_d[4'h9] &
+                   op_21_20_d[2'h0]  & op_19_15_d[5'h11];
 
 // ============================================================
 // Branch / Jump
@@ -351,7 +371,7 @@ assign inst_valid = inst_add_w | inst_sub_w | inst_slt | inst_sltu |
                     inst_slli_w | inst_srli_w | inst_srai_w |
                     inst_addi_w | inst_slti | inst_sltui | inst_andi | inst_ori | inst_xori |
                     inst_ld_b | inst_ld_h | inst_ld_w | inst_ld_bu | inst_ld_hu |
-                    inst_st_b | inst_st_h | inst_st_w |
+                    inst_st_b | inst_st_h | inst_st_w | inst_ll_w | inst_sc_w |
                     inst_jirl | inst_b | inst_bl |
                     inst_beq | inst_bne | inst_blt | inst_bge | inst_bltu | inst_bgeu |
                     inst_lu12i_w | inst_pcaddu12i |
@@ -362,13 +382,13 @@ assign inst_valid = inst_add_w | inst_sub_w | inst_slt | inst_sltu |
                     inst_syscall | inst_ertn | inst_break |
                     inst_rdcntvl_w | inst_rdcntvh_w | inst_rdcntid |
                     inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill | inst_invtlb |
-                    inst_cacop;
+                    inst_cacop | inst_dbar | inst_ibar | inst_idle;
 
 // ============================================================
 // Common decode helpers
 // ============================================================
-assign load_op      = inst_ld_b | inst_ld_h | inst_ld_w | inst_ld_bu | inst_ld_hu;
-assign store_op     = inst_st_b | inst_st_h | inst_st_w;
+assign load_op      = inst_ld_b | inst_ld_h | inst_ld_w | inst_ld_bu | inst_ld_hu | inst_ll_w;
+assign store_op     = inst_st_b | inst_st_h | inst_st_w | inst_sc_w;
 assign branch_op    = inst_beq | inst_bne | inst_blt | inst_bge | inst_bltu | inst_bgeu;
 
 assign mem_size     = (inst_ld_b | inst_ld_bu | inst_st_b) ? 2'b00 :
@@ -407,6 +427,8 @@ assign src2_is_4  = inst_jirl | inst_bl;
 assign imm = src2_is_4 ? 32'h4                      :
              need_si20 ? {i20[19:0], 12'b0}         :
              need_ui12 ? {20'b0, i12[11:0]}          :
+             (inst_ll_w | inst_sc_w)
+                       ? {{16{si14[13]}}, si14, 2'b0} :
             /*need_si12*/{{20{i12[11]}}, i12[11:0]} ;
 
 assign br_offs = need_si26 ? {{ 4{i26[25]}}, i26[25:0], 2'b0} :
@@ -440,9 +462,10 @@ assign dst_is_r1     = inst_bl;
 
 // gr_we: rdcntv and rdcntid write GR; break/syscall/ertn do not
 assign gr_we = inst_rdcntv | inst_rdcntid |
+               inst_sc_w |
                (~store_op & ~branch_op & ~inst_b & ~inst_syscall & ~inst_ertn & ~inst_break
                 & ~inst_tlbsrch & ~inst_tlbrd & ~inst_tlbwr & ~inst_tlbfill & ~inst_invtlb_base
-                & ~inst_cacop);
+                & ~inst_cacop & ~inst_dbar & ~inst_ibar & ~inst_idle);
 assign mem_we = store_op;
 
 assign dest  = dst_is_r1    ? 5'd1 :
@@ -492,8 +515,9 @@ assign br_taken = (   inst_beq  &&  rj_eq_rd
                    || inst_b
                   ) && ds_ready_go && es_allowin && (fs_ex !== 1'b1);
 
-assign inst_no_dest = store_op | inst_b | branch_op | inst_tlbsrch | inst_tlbrd
-                      | inst_tlbwr | inst_tlbfill | inst_invtlb_base | inst_cacop;
+assign inst_no_dest = (store_op & ~inst_sc_w) | inst_b | branch_op | inst_tlbsrch | inst_tlbrd
+                      | inst_tlbwr | inst_tlbfill | inst_invtlb_base | inst_cacop
+                      | inst_dbar | inst_ibar | inst_idle;
 
 // ============================================================
 // Hazard detection
@@ -501,14 +525,17 @@ assign inst_no_dest = store_op | inst_b | branch_op | inst_tlbsrch | inst_tlbrd
 assign src_no_rj = inst_b | inst_bl | inst_lu12i_w | inst_pcaddu12i
                    | inst_csrrd | inst_csrwr | inst_syscall | inst_ertn
                    | inst_rdcntv | inst_rdcntid
-                   | inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill;
+                   | inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill
+                   | inst_dbar | inst_ibar | inst_idle;
 assign src_no_rk = inst_slli_w | inst_srli_w | inst_srai_w | inst_addi_w | load_op | store_op
                    | inst_jirl | inst_b | inst_bl | branch_op | inst_lu12i_w | inst_pcaddu12i
                    | inst_slti | inst_sltui | inst_andi | inst_ori | inst_xori
                    | inst_csrrd | inst_csrwr | inst_csrxchg | inst_syscall | inst_ertn
                    | inst_rdcntv | inst_rdcntid
-                   | inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill;
-assign src_no_rd = ~store_op & ~branch_op & ~inst_csrwr & ~inst_csrxchg;
+                   | inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill
+                   | inst_dbar | inst_ibar | inst_idle;
+assign src_no_rd = inst_dbar | inst_ibar | inst_idle |
+                   (~store_op & ~branch_op & ~inst_csrwr & ~inst_csrxchg);
 
 assign rj_wait = ~src_no_rj && (rj != 5'b00000)
                  && ((rj == es_to_ds_dest) || (rj == ms_to_ds_dest) || (rj == ws_to_ds_dest));
@@ -615,6 +642,11 @@ assign {rf_we   ,  //37:37
 assign ds_to_es_bus = {ds_ex,
                        ds_ecode,
                        ds_esubcode,
+                       inst_ll_w,
+                       inst_sc_w,
+                       inst_dbar,
+                       inst_ibar,
+                       inst_idle,
                        inst_rdcntv,
                        inst_rdcntvh_w,
                        inst_rdcntid,
@@ -647,19 +679,21 @@ assign ds_to_es_bus = {ds_ex,
 // ============================================================
 // Pipeline control
 // ============================================================
-assign ds_ready_go    = ds_valid && ~load_stall && ~csr_stall && !flush && !ertn_flush;
+assign ds_ready_go    = ds_valid && ~load_stall && ~csr_stall &&
+                        !flush && !ertn_flush && !ibar_flush;
 assign ds_allowin     = !ds_valid || ds_ready_go && es_allowin;
 assign ds_to_es_valid = ds_valid && ds_ready_go;
 
 always @(posedge clk) begin
-    if (reset || flush || ertn_flush || br_taken) begin
+    if (reset || flush || ertn_flush || ibar_flush || br_taken) begin
         ds_valid <= 1'b0;
     end
     else if (ds_allowin) begin
         ds_valid <= fs_to_ds_valid;
     end
 
-    if (fs_to_ds_valid && ds_allowin && !flush && !br_taken) begin
+    if (fs_to_ds_valid && ds_allowin && !flush && !ertn_flush &&
+        !ibar_flush && !br_taken) begin
         fs_to_ds_bus_r <= fs_to_ds_bus;
     end
 end
