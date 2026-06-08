@@ -681,6 +681,8 @@ wire         fs_to_ds_valid;
 wire         ds_to_es_valid;
 wire         es_to_ms_valid;
 wire         ms_to_ws_valid;
+wire         ms_empty;
+wire         ws_empty;
 wire [`FS_TO_DS_BUS_WD -1:0] fs_to_ds_bus;
 wire [`DS_TO_ES_BUS_WD -1:0] ds_to_es_bus;
 wire [`ES_TO_MS_BUS_WD -1:0] es_to_ms_bus;
@@ -846,6 +848,7 @@ exe_stage exe_stage(
     .reset          (reset          ),
     //allowin
     .ms_allowin     (ms_allowin     ),
+    .older_pipe_empty(ms_empty && ws_empty),
     .es_allowin     (es_allowin     ),
     //from ds
     .ds_to_es_valid (ds_to_es_valid ),
@@ -914,6 +917,7 @@ mem_stage mem_stage(
     //allowin
     .ws_allowin     (ws_allowin     ),
     .ms_allowin     (ms_allowin     ),
+    .ms_empty       (ms_empty       ),
     //from es
     .es_to_ms_valid (es_to_ms_valid ),
     .es_to_ms_bus   (es_to_ms_bus   ),
@@ -940,6 +944,7 @@ wb_stage wb_stage(
     .reset          (reset          ),
     //allowin
     .ws_allowin     (ws_allowin     ),
+    .ws_empty       (ws_empty       ),
     //from ms
     .ms_to_ws_valid (ms_to_ws_valid ),
     .ms_to_ws_bus   (ms_to_ws_bus   ),

@@ -359,10 +359,10 @@ always @(posedge clk) begin
 
         if (tlbsrch_en) begin
             if (tlbsrch_found) begin
-                tlbidx <= {27'b0, tlbsrch_index};
+                tlbidx <= {1'b0, tlbidx[30:5], tlbsrch_index};
             end
             else begin
-                tlbidx <= 32'h80000000;
+                tlbidx <= {1'b1, tlbidx[30:0]};
             end
         end
 

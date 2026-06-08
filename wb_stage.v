@@ -5,6 +5,7 @@ module wb_stage(
     input  wire                     reset         ,
     //allowin
     output wire                     ws_allowin    ,
+    output wire                     ws_empty      ,
     //from ms
     input  wire                     ms_to_ws_valid,
     input  wire [`MS_TO_WS_BUS_WD -1:0]  ms_to_ws_bus  ,
@@ -48,6 +49,7 @@ assign ws_to_rf_bus = {rf_we   ,  //37:37
 
 assign ws_ready_go = 1'b1;
 assign ws_allowin  = !ws_valid || ws_ready_go;
+assign ws_empty    = !ws_valid;
 always @(posedge clk) begin
     if (reset) begin
         ws_valid <= 1'b0;

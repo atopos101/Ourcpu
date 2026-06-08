@@ -114,6 +114,7 @@ function vppn_match;
     input [ 5:0] entry_ps;
     begin
         case (entry_ps)
+            6'd21:  vppn_match = (search_vppn[18:9] == entry_vppn[18:9]);
             6'd22:  vppn_match = (search_vppn[18:10] == entry_vppn[18:10]);
             default:vppn_match = (search_vppn        == entry_vppn);
         endcase
@@ -125,7 +126,8 @@ function odd_page;
     input        va_bit12;
     input [ 5:0] entry_ps;
     begin
-        odd_page = (entry_ps == 6'd22) ? search_vppn[9] : va_bit12;
+        odd_page = (entry_ps == 6'd21) ? search_vppn[8] :
+                   (entry_ps == 6'd22) ? search_vppn[9] : va_bit12;
     end
 endfunction
 

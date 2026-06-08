@@ -5,6 +5,7 @@ module exe_stage(
     input                          reset         ,
     //allowin
     input                          ms_allowin    ,
+    input                          older_pipe_empty,
     output                         es_allowin    ,
     //from ds
     input                          ds_to_es_valid,
@@ -456,7 +457,8 @@ wire inst_dmw1_hit = csr_pg &&
 wire inst_dmw_hit  = inst_dmw0_hit || inst_dmw1_hit;
 wire [31:0] inst_dmw_paddr = inst_dmw0_hit ? {csr_dmw0[27:25], inst_vaddr[28:0]} :
                                              {csr_dmw1[27:25], inst_vaddr[28:0]};
-wire [31:0] inst_tlb_paddr = (s0_ps == 6'd22) ? {s0_ppn[19:10], inst_vaddr[21:0]} :
+wire [31:0] inst_tlb_paddr = (s0_ps == 6'd21) ? {s0_ppn[19:9], inst_vaddr[20:0]} :
+                               (s0_ps == 6'd22) ? {s0_ppn[19:10], inst_vaddr[21:0]} :
                                                  {s0_ppn[19:0],  inst_vaddr[11:0]};
 wire inst_use_tlb = csr_pg && !inst_dmw_hit;
 wire inst_tlbr_ex = inst_use_tlb && !s0_found;
@@ -483,7 +485,8 @@ wire data_dmw1_hit = csr_pg &&
 wire data_dmw_hit  = data_dmw0_hit || data_dmw1_hit;
 wire [31:0] data_dmw_paddr = data_dmw0_hit ? {csr_dmw0[27:25], data_vaddr[28:0]} :
                                              {csr_dmw1[27:25], data_vaddr[28:0]};
-wire [31:0] data_tlb_paddr = (s1_ps == 6'd22) ? {s1_ppn[19:10], data_vaddr[21:0]} :
+wire [31:0] data_tlb_paddr = (s1_ps == 6'd21) ? {s1_ppn[19:9], data_vaddr[20:0]} :
+                               (s1_ps == 6'd22) ? {s1_ppn[19:10], data_vaddr[21:0]} :
                                                  {s1_ppn[19:0],  data_vaddr[11:0]};
 wire [31:0] data_paddr = !csr_pg      ? data_vaddr :
                          data_dmw_hit ? data_dmw_paddr :
@@ -550,8 +553,11 @@ assign ex_int = has_int && es_valid && !ex_sync &&
 assign ex_pending = ex_sync || ex_int;
 assign wb_ex = es_commit && ex_pending;
 
-wire sc_success = inst_sc_w && sc_can_store && data_access_cached && !ex_pending;
+wire sc_success = inst_sc_w && sc_can_store && !ex_pending;
 wire actual_mem_we = es_mem_we && (!inst_sc_w || sc_success);
+wire privileged_state_op = csr_we_req || (tlb_op != 3'b0) ||
+                           ex_pending || ertn_pending;
+wire privileged_state_ready = !privileged_state_op || older_pipe_empty;
 
 // ============================================================
 // Exception info for CSR
@@ -696,11 +702,12 @@ assign idle_wait       = es_valid && inst_idle && !wb_ex;
 // ============================================================
 // Pipeline control
 // ============================================================
-assign es_ready_go    = div_op ? div_done :
-                        inst_cacop ? (ex_pending || cacop_ok) :
-                        barrier_op ? (ex_pending || barrier_done) :
-                        inst_idle ? ex_pending :
-                        (!es_mem_access || data_sram_addr_ok);
+wire es_operation_ready = div_op ? div_done :
+                          inst_cacop ? (ex_pending || cacop_ok) :
+                          barrier_op ? (ex_pending || barrier_done) :
+                          inst_idle ? ex_pending :
+                          (!es_mem_access || data_sram_addr_ok);
+assign es_ready_go    = es_operation_ready && privileged_state_ready;
 assign es_allowin     = !es_valid || es_ready_go && ms_allowin;
 assign es_to_ms_valid = es_valid && es_ready_go;
 

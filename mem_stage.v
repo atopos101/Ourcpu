@@ -8,6 +8,7 @@ module mem_stage(
     // allowin
     input                          ws_allowin,
     output                         ms_allowin,
+    output                         ms_empty,
 
     // from es
     input                          es_to_ms_valid,
@@ -95,6 +96,8 @@ assign ms_allowin =
        !ms_valid
     || (ms_ready_go && ws_allowin);
 
+assign ms_empty = !ms_valid;
+
 //==========================================================
 // pipeline valid
 //==========================================================
@@ -164,7 +167,7 @@ assign ms_final_result =
 
 wire ms_commit = ms_valid && ms_ready_go && ws_allowin;
 
-assign ll_commit_valid = ms_commit && ms_inst_ll_w && ms_access_cached;
+assign ll_commit_valid = ms_commit && ms_inst_ll_w;
 assign sc_commit_valid = ms_commit && ms_inst_sc_w;
 assign local_store_commit_valid = ms_commit && ms_mem_access &&
                                   !ms_res_from_mem && !ms_inst_sc_w;

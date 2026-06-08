@@ -250,6 +250,8 @@ assign inst_st_h  = op_31_26_d[6'h0a] & op_25_22_d[4'h5];
 assign inst_st_w  = op_31_26_d[6'h0a] & op_25_22_d[4'h6];
 assign inst_ld_bu = op_31_26_d[6'h0a] & op_25_22_d[4'h8];
 assign inst_ld_hu = op_31_26_d[6'h0a] & op_25_22_d[4'h9];
+wire inst_preld;
+assign inst_preld = op_31_26_d[6'h0a] & op_25_22_d[4'hb];
 assign inst_ll_w  = ds_inst[31:24] == 8'h20;
 assign inst_sc_w  = ds_inst[31:24] == 8'h21;
 
@@ -370,7 +372,7 @@ assign inst_valid = inst_add_w | inst_sub_w | inst_slt | inst_sltu |
                     inst_nor | inst_and | inst_or | inst_xor |
                     inst_slli_w | inst_srli_w | inst_srai_w |
                     inst_addi_w | inst_slti | inst_sltui | inst_andi | inst_ori | inst_xori |
-                    inst_ld_b | inst_ld_h | inst_ld_w | inst_ld_bu | inst_ld_hu |
+                    inst_ld_b | inst_ld_h | inst_ld_w | inst_ld_bu | inst_ld_hu | inst_preld |
                     inst_st_b | inst_st_h | inst_st_w | inst_ll_w | inst_sc_w |
                     inst_jirl | inst_b | inst_bl |
                     inst_beq | inst_bne | inst_blt | inst_bge | inst_bltu | inst_bgeu |
@@ -463,7 +465,7 @@ assign dst_is_r1     = inst_bl;
 // gr_we: rdcntv and rdcntid write GR; break/syscall/ertn do not
 assign gr_we = inst_rdcntv | inst_rdcntid |
                inst_sc_w |
-               (~store_op & ~branch_op & ~inst_b & ~inst_syscall & ~inst_ertn & ~inst_break
+               (~store_op & ~inst_preld & ~branch_op & ~inst_b & ~inst_syscall & ~inst_ertn & ~inst_break
                 & ~inst_tlbsrch & ~inst_tlbrd & ~inst_tlbwr & ~inst_tlbfill & ~inst_invtlb_base
                 & ~inst_cacop & ~inst_dbar & ~inst_ibar & ~inst_idle);
 assign mem_we = store_op;
@@ -515,7 +517,7 @@ assign br_taken = (   inst_beq  &&  rj_eq_rd
                    || inst_b
                   ) && ds_ready_go && es_allowin && (fs_ex !== 1'b1);
 
-assign inst_no_dest = (store_op & ~inst_sc_w) | inst_b | branch_op | inst_tlbsrch | inst_tlbrd
+assign inst_no_dest = (store_op & ~inst_sc_w) | inst_preld | inst_b | branch_op | inst_tlbsrch | inst_tlbrd
                       | inst_tlbwr | inst_tlbfill | inst_invtlb_base | inst_cacop
                       | inst_dbar | inst_ibar | inst_idle;
 

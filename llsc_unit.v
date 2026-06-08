@@ -25,18 +25,12 @@ module llsc_unit(
 reg        reservation_valid_r;
 reg [27:0] reservation_line_r;
 
-wire local_store_hit = local_store_commit_valid &&
-                       (local_store_commit_line == reservation_line_r);
-wire dcache_inv_hit = dcache_inv_valid &&
-                      (dcache_inv_line == reservation_line_r);
 wire external_store_hit = external_store_valid &&
                           (external_store_line == reservation_line_r);
 wire ertn_clear = ertn_commit && !llbctl_klo;
 
 wire reservation_clear = sc_commit_valid || wcllb_commit || ertn_clear ||
-                         (reservation_valid_r &&
-                          (local_store_hit || dcache_inv_hit ||
-                           external_store_hit));
+                         (reservation_valid_r && external_store_hit);
 
 assign reservation_valid = reservation_clear ? 1'b0 :
                            ll_commit_valid ? 1'b1 :
@@ -46,7 +40,7 @@ wire current_reservation_match = reservation_valid_r &&
                                  (reservation_line_r == sc_query_line);
 wire retiring_ll_match = ll_commit_valid &&
                          (ll_commit_line == sc_query_line);
-assign sc_can_store = sc_query_cached && !reservation_clear &&
+assign sc_can_store = !reservation_clear &&
                       (current_reservation_match || retiring_ll_match);
 
 always @(posedge clk) begin
