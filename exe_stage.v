@@ -336,7 +336,7 @@ tlb #(.TLBNUM(32)) u_tlb(
     .invtlb_op    (invtlb_op),
     .we           (tlb_we),
     .w_index      (tlb_write_index),
-    .w_e          (~csr_tlbidx_ne),
+    .w_e          (inst_tlbfill || ~csr_tlbidx_ne),
     .w_vppn       (csr_tlbehi[31:13]),
     .w_ps         (csr_tlbidx_ps),
     .w_asid       (csr_asid),
