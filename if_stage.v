@@ -13,6 +13,11 @@ module if_stage(
     // ertn interface
     input                          ertn_flush     ,
     input  [31:0]                  ertn_pc        ,
+    // IBAR completion redirect
+    input                          ibar_flush     ,
+    input  [31:0]                  ibar_target    ,
+    // IDLE wait state
+    input                          idle_wait      ,
     // address translation
     output [31:0]                  inst_vaddr     ,
     input  [31:0]                  inst_paddr     ,
@@ -92,9 +97,10 @@ assign fs_to_ds_bus = {fs_inst,
 
 // pre-IF stage
 assign to_fs_valid  = ~reset;
-assign redirect     = ertn_flush || flush || br_taken;
+assign redirect     = ertn_flush || flush || ibar_flush || br_taken;
 assign redirect_pc  = ertn_flush ? ertn_pc  :
                       flush      ? ex_entry :
+                      ibar_flush ? ibar_target :
                       br_target;
 
 // IF stage
@@ -106,7 +112,7 @@ assign inst_vaddr      = fs_req ? req_pc : fetch_pc;
 assign inst_addr_hs   = fetch_ex || (inst_sram_req && inst_sram_addr_ok);
 assign inst_data_hs   = resp_pending && inst_sram_data_ok;
 
-assign inst_sram_req    = fs_req && !fetch_ex;
+assign inst_sram_req    = fs_req && !fetch_ex && !idle_wait;
 assign inst_sram_wr     = 1'b0;
 assign inst_sram_size   = 2'b10;
 assign inst_sram_wstrb  = 4'b0000;
@@ -202,7 +208,8 @@ always @(posedge clk) begin
                 resp_cancel <= 1'b0;
             end
         end
-        else if (to_fs_valid && !fs_req && !resp_pending && !fs_valid) begin
+        else if (to_fs_valid && !idle_wait &&
+                 !fs_req && !resp_pending && !fs_valid) begin
             fs_req <= 1'b1;
             req_pc <= fetch_pc;
             req_cancel <= 1'b0;

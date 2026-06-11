@@ -20,6 +20,10 @@ module csr_regfile(
     // ERTN interface
     input         ertn_flush,
     output [31:0] ertn_pc,
+    // LL/SC control
+    input         reservation_valid,
+    output        llbctl_klo,
+    output        wcllb_commit,
     // interrupt interface
     input  [7:0]  hw_int_in,
     output        has_int,
@@ -38,13 +42,13 @@ module csr_regfile(
     output [31:0] csr_tlbelo0,
     output [31:0] csr_tlbelo1,
     output [ 9:0] csr_asid,
-    output [ 3:0] csr_tlbidx_index,
+    output [ 4:0] csr_tlbidx_index,
     output [ 5:0] csr_tlbidx_ps,
     output        csr_tlbidx_ne,
     // TLB instruction side effects
     input         tlbsrch_en,
     input         tlbsrch_found,
-    input  [ 3:0] tlbsrch_index,
+    input  [ 4:0] tlbsrch_index,
     input         tlbrd_en,
     input         tlbrd_e,
     input  [18:0] tlbrd_vppn,
@@ -78,6 +82,9 @@ localparam CSR_TLBEHI = 14'h11;
 localparam CSR_TLBELO0= 14'h12;
 localparam CSR_TLBELO1= 14'h13;
 localparam CSR_ASID   = 14'h18;
+localparam CSR_PGDL   = 14'h19;
+localparam CSR_PGDH   = 14'h1A;
+localparam CSR_PGD    = 14'h1B;
 localparam CSR_SAVE0  = 14'h30;
 localparam CSR_SAVE1  = 14'h31;
 localparam CSR_SAVE2  = 14'h32;
@@ -86,6 +93,7 @@ localparam CSR_TID    = 14'h40;
 localparam CSR_TCFG   = 14'h41;
 localparam CSR_TVAL   = 14'h42;
 localparam CSR_TICLR  = 14'h44;
+localparam CSR_LLBCTL = 14'h60;
 localparam CSR_TLBRENTRY = 14'h88;
 localparam CSR_DMW0   = 14'h180;
 localparam CSR_DMW1   = 14'h181;
@@ -105,6 +113,8 @@ reg [31:0] tlbehi;
 reg [31:0] tlbelo0;
 reg [31:0] tlbelo1;
 reg [ 9:0] asid;
+reg [31:0] pgdl;
+reg [31:0] pgdh;
 reg [31:0] save0;
 reg [31:0] save1;
 reg [31:0] save2;
@@ -112,6 +122,7 @@ reg [31:0] save3;
 reg [31:0] tid;
 reg [31:0] tcfg;
 reg [31:0] tval;
+reg        llbctl_klo_r;
 reg [31:0] tlbrentry;
 reg [31:0] dmw0;
 reg [31:0] dmw1;
@@ -139,6 +150,7 @@ wire        timer_will_expire = timer_en && (tval == 32'h1);
 // ============================================================
 assign ex_entry = (wb_ecode == `ECODE_TLBR) ? tlbrentry : eentry;
 assign ertn_pc  = era;
+assign llbctl_klo = llbctl_klo_r;
 assign csr_crmd         = crmd;
 assign csr_dmw0         = dmw0;
 assign csr_dmw1         = dmw1;
@@ -147,9 +159,11 @@ assign csr_tlbehi       = tlbehi;
 assign csr_tlbelo0      = tlbelo0;
 assign csr_tlbelo1      = tlbelo1;
 assign csr_asid         = asid;
-assign csr_tlbidx_index = tlbidx[3:0];
+assign csr_tlbidx_index = tlbidx[4:0];
 assign csr_tlbidx_ps    = tlbidx[29:24];
 assign csr_tlbidx_ne    = tlbidx[31];
+assign wcllb_commit = csr_inst_we && (csr_num == CSR_LLBCTL) &&
+                      csr_wmask[1] && csr_wvalue[1];
 
 // ============================================================
 // Interrupt logic
@@ -192,6 +206,9 @@ always @(*) begin
             CSR_TLBELO0:csr_rvalue_reg = tlbelo0;
             CSR_TLBELO1:csr_rvalue_reg = tlbelo1;
             CSR_ASID:   csr_rvalue_reg = {8'b0, 8'd10, 6'b0, asid};
+            CSR_PGDL:   csr_rvalue_reg = pgdl;
+            CSR_PGDH:   csr_rvalue_reg = pgdh;
+            CSR_PGD:    csr_rvalue_reg = badv[31] ? pgdh : pgdl;
             CSR_SAVE0:  csr_rvalue_reg = save0;
             CSR_SAVE1:  csr_rvalue_reg = save1;
             CSR_SAVE2:  csr_rvalue_reg = save2;
@@ -200,6 +217,8 @@ always @(*) begin
             CSR_TCFG:   csr_rvalue_reg = tcfg;
             CSR_TVAL:   csr_rvalue_reg = tval;
             CSR_TICLR:  csr_rvalue_reg = 32'b0;  // write-only, reads as 0
+            CSR_LLBCTL: csr_rvalue_reg = {29'b0, llbctl_klo_r, 1'b0,
+                                          reservation_valid};
             CSR_TLBRENTRY: csr_rvalue_reg = tlbrentry;
             CSR_DMW0:   csr_rvalue_reg = dmw0;
             CSR_DMW1:   csr_rvalue_reg = dmw1;
@@ -227,6 +246,8 @@ wire [31:0] tlbehi_wdata = (tlbehi & ~csr_wmask) | (csr_wvalue & csr_wmask);
 wire [31:0] tlbelo0_wdata = (tlbelo0 & ~csr_wmask) | (csr_wvalue & csr_wmask);
 wire [31:0] tlbelo1_wdata = (tlbelo1 & ~csr_wmask) | (csr_wvalue & csr_wmask);
 wire [31:0] asid_wdata   = ({22'b0, asid} & ~csr_wmask) | (csr_wvalue & csr_wmask);
+wire [31:0] pgdl_wdata   = (pgdl & ~csr_wmask) | (csr_wvalue & csr_wmask);
+wire [31:0] pgdh_wdata   = (pgdh & ~csr_wmask) | (csr_wvalue & csr_wmask);
 wire [31:0] save0_wdata  = (save0  & ~csr_wmask) | (csr_wvalue & csr_wmask);
 wire [31:0] save1_wdata  = (save1  & ~csr_wmask) | (csr_wvalue & csr_wmask);
 wire [31:0] save2_wdata  = (save2  & ~csr_wmask) | (csr_wvalue & csr_wmask);
@@ -261,6 +282,8 @@ always @(posedge clk) begin
         tlbelo0 <= 32'b0;
         tlbelo1 <= 32'b0;
         asid   <= 10'b0;
+        pgdl   <= 32'b0;
+        pgdh   <= 32'b0;
         save0  <= 32'b0;
         save1  <= 32'b0;
         save2  <= 32'b0;
@@ -268,6 +291,7 @@ always @(posedge clk) begin
         tid    <= 32'b0;
         tcfg   <= 32'b0;
         tval   <= 32'b0;
+        llbctl_klo_r <= 1'b0;
         tlbrentry <= 32'b0;
         dmw0   <= 32'b0;
         dmw1   <= 32'b0;
@@ -310,11 +334,13 @@ always @(posedge clk) begin
                 CSR_ERA:    era    <= era_wdata;
                 CSR_BADV:   badv   <= badv_wdata;
                 CSR_EENTRY: eentry <= eentry_wdata;
-                CSR_TLBIDX: tlbidx <= tlbidx_wdata & 32'hbf00000f;
+                CSR_TLBIDX: tlbidx <= tlbidx_wdata & 32'hbf00001f;
                 CSR_TLBEHI: tlbehi <= tlbehi_wdata & 32'hffffe000;
                 CSR_TLBELO0:tlbelo0 <= tlbelo0_wdata & 32'h0fffffff;
                 CSR_TLBELO1:tlbelo1 <= tlbelo1_wdata & 32'h0fffffff;
                 CSR_ASID:   asid <= asid_wdata[9:0];
+                CSR_PGDL:   pgdl <= pgdl_wdata & 32'hfffff000;
+                CSR_PGDH:   pgdh <= pgdh_wdata & 32'hfffff000;
                 CSR_SAVE0:  save0  <= save0_wdata;
                 CSR_SAVE1:  save1  <= save1_wdata;
                 CSR_SAVE2:  save2  <= save2_wdata;
@@ -333,6 +359,11 @@ always @(posedge clk) begin
                     end
                 end
                 CSR_TICLR:  ; // write-only, handled above via timer_pending clear
+                CSR_LLBCTL: begin
+                    if (csr_wmask[2]) begin
+                        llbctl_klo_r <= csr_wvalue[2];
+                    end
+                end
                 CSR_TLBRENTRY: tlbrentry <= tlbrentry_wdata;
                 CSR_DMW0:   dmw0 <= dmw0_wdata & 32'hee000039;
                 CSR_DMW1:   dmw1 <= dmw1_wdata & 32'hee000039;
@@ -342,23 +373,23 @@ always @(posedge clk) begin
 
         if (tlbsrch_en) begin
             if (tlbsrch_found) begin
-                tlbidx <= {28'b0, tlbsrch_index};
+                tlbidx <= {1'b0, tlbidx[30:5], tlbsrch_index};
             end
             else begin
-                tlbidx <= 32'h80000000;
+                tlbidx <= {1'b1, tlbidx[30:0]};
             end
         end
 
         if (tlbrd_en) begin
             if (tlbrd_e) begin
-                tlbidx  <= {2'b0, tlbrd_ps, 20'b0, tlbidx[3:0]};
+                tlbidx  <= {2'b0, tlbrd_ps, 19'b0, tlbidx[4:0]};
                 tlbehi  <= {tlbrd_vppn, 13'b0};
                 tlbelo0 <= {4'b0, tlbrd_ppn0, 1'b0, tlbrd_g, tlbrd_mat0, tlbrd_plv0, tlbrd_d0, tlbrd_v0};
                 tlbelo1 <= {4'b0, tlbrd_ppn1, 1'b0, tlbrd_g, tlbrd_mat1, tlbrd_plv1, tlbrd_d1, tlbrd_v1};
                 asid    <= tlbrd_asid;
             end
             else begin
-                tlbidx  <= 32'h80000000 | {28'b0, tlbidx[3:0]};
+                tlbidx  <= 32'h80000000 | {27'b0, tlbidx[4:0]};
                 tlbehi  <= 32'b0;
                 tlbelo0 <= 32'b0;
                 tlbelo1 <= 32'b0;
@@ -405,6 +436,7 @@ always @(posedge clk) begin
         if (ertn_flush) begin
             crmd[1:0] <= prmd[1:0];
             crmd[2]   <= prmd[2];
+            llbctl_klo_r <= 1'b0;
             if (estat[21:16] == `ECODE_TLBR) begin
                 crmd[3] <= 1'b0;
                 crmd[4] <= 1'b1;

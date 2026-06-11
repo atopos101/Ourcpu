@@ -22,6 +22,7 @@ module icache (
     input  wire        cacop_way,
     input  wire [19:0] cacop_tag,
     output reg         cacop_ok,
+    output wire        idle,
 
     output reg         rd_req,
     output wire [ 2:0] rd_type,
@@ -140,6 +141,7 @@ assign refill_word = (req_op && (refill_cnt == req_bank)) ?
                      merge_word(ret_data, req_wdata, req_wstrb) : ret_data;
 
 assign addr_ok = (state == S_IDLE) && valid && !cacop_valid;
+assign idle = (state == S_IDLE) && !rd_req && !wr_req;
 
 assign rd_type = REQ_READ_LINE;
 assign rd_addr = {req_tag, req_index, 4'b0000};
@@ -197,9 +199,9 @@ always @(posedge clk) begin
         refill_cnt <= 2'b00;
         cacop_ok   <= 1'b0;
         for (i = 0; i < 256; i = i + 1) begin
-            d_table[0][i] <= 1'b0;
-            d_table[1][i] <= 1'b0;
-            lru[i]        <= 1'b0;
+            d_table[0][i] = 1'b0;
+            d_table[1][i] = 1'b0;
+            lru[i]        = 1'b0;
         end
     end
     else begin
