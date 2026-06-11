@@ -114,6 +114,18 @@ wire [ 7:0] barrier_icache_index;
 wire        barrier_icache_way;
 wire        bridge_data_busy;
 
+wire        core_barrier_req;
+wire        core_barrier_is_ibar;
+wire        core_barrier_done;
+wire        barrier_busy;
+wire        barrier_dcache_valid;
+wire [ 7:0] barrier_dcache_index;
+wire        barrier_dcache_way;
+wire        barrier_icache_valid;
+wire [ 7:0] barrier_icache_index;
+wire        barrier_icache_way;
+wire        bridge_data_busy;
+
 wire        dcache_addr_ok;
 wire        dcache_data_ok;
 wire [31:0] dcache_rdata;
