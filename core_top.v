@@ -114,18 +114,6 @@ wire [ 7:0] barrier_icache_index;
 wire        barrier_icache_way;
 wire        bridge_data_busy;
 
-wire        core_barrier_req;
-wire        core_barrier_is_ibar;
-wire        core_barrier_done;
-wire        barrier_busy;
-wire        barrier_dcache_valid;
-wire [ 7:0] barrier_dcache_index;
-wire        barrier_dcache_way;
-wire        barrier_icache_valid;
-wire [ 7:0] barrier_icache_index;
-wire        barrier_icache_way;
-wire        bridge_data_busy;
-
 wire        dcache_addr_ok;
 wire        dcache_data_ok;
 wire [31:0] dcache_rdata;
@@ -701,13 +689,52 @@ wire [`ES_TO_MS_BUS_WD -1:0] es_to_ms_bus;
 wire [`MS_TO_WS_BUS_WD -1:0] ms_to_ws_bus;
 wire [`WS_TO_RF_BUS_WD -1:0] ws_to_rf_bus;
 wire [`BR_BUS_WD       -1:0] br_bus;
-wire [4:0] es_to_ds_dest;
+
+// Seven-stage migration aliases. Phase 1 keeps the existing five-stage
+// modules connected while making the new stage boundaries visible.
+wire         if1_allowin;
+wire         if2_allowin;
+wire         id_allowin;
+wire         ex1_allowin;
+wire         ex2_allowin;
+wire         mem_allowin;
+wire         wb_allowin;
+wire         if1_to_if2_valid;
+wire         if2_to_id_valid;
+wire         id_to_ex1_valid;
+wire         ex1_to_ex2_valid;
+wire         ex2_to_mem_valid;
+wire         mem_to_wb_valid;
+wire         ex2_empty;
+wire [`IF1_TO_IF2_BUS_WD -1:0] if1_to_if2_bus;
+wire [`IF2_TO_ID_BUS_WD  -1:0] if2_to_id_bus;
+wire [`ID_TO_EX1_BUS_WD  -1:0] id_to_ex1_bus;
+wire [`EX1_TO_EX2_BUS_WD -1:0] ex1_to_ex2_bus;
+wire [`EX2_TO_MEM_BUS_WD -1:0] ex2_to_mem_bus;
+
+assign if1_allowin      = if2_allowin;
+assign id_allowin       = ds_allowin;
+assign es_allowin       = ex1_allowin;
+assign mem_allowin      = ms_allowin;
+assign wb_allowin       = ws_allowin;
+assign if2_to_id_valid  = fs_to_ds_valid;
+assign id_to_ex1_valid  = ds_to_es_valid;
+assign es_to_ms_valid   = ex2_to_mem_valid;
+assign mem_to_wb_valid  = ms_to_ws_valid;
+assign if2_to_id_bus    = fs_to_ds_bus;
+assign id_to_ex1_bus    = ds_to_es_bus;
+assign es_to_ms_bus     = ex2_to_mem_bus;
+
+wire [4:0] ex1_to_ds_dest;
+wire [4:0] ex2_to_ds_dest;
 wire [4:0] ms_to_ds_dest;
 wire [4:0] ws_to_ds_dest;
-wire       es_to_ds_load_op;
-wire       ms_to_ds_load_op;
-wire [4:0] ms_to_ds_load_dest;
-wire [31:0] es_to_ds_result;
+wire       ex1_to_ds_result_ready;
+wire       ex2_to_ds_result_ready;
+wire       ms_to_ds_result_ready;
+wire       ws_to_ds_result_ready;
+wire [31:0] ex1_to_ds_result;
+wire [31:0] ex2_to_ds_result;
 wire [31:0] ms_to_ds_result;
 wire [31:0] ws_to_ds_result;
 wire [31:0] inst_vaddr;
@@ -727,11 +754,31 @@ wire [31:0] ertn_pc;
 wire        ibar_flush;
 wire [31:0] ibar_target;
 wire        idle_wait;
+wire        br_stall;
+wire        br_taken;
+wire [31:0] br_target;
+wire        redirect_valid;
+wire [31:0] redirect_pc;
+wire [ 1:0] redirect_cause;
+
+assign {br_stall, br_taken, br_target} = br_bus;
+assign redirect_valid = ertn_flush || flush || ibar_flush || br_taken;
+assign redirect_pc    = ertn_flush ? ertn_pc     :
+                        flush      ? ex_entry    :
+                        ibar_flush ? ibar_target :
+                                     br_target;
+assign redirect_cause = ertn_flush ? `REDIRECT_CAUSE_ERTN :
+                        flush      ? `REDIRECT_CAUSE_EXCP :
+                        ibar_flush ? `REDIRECT_CAUSE_IBAR :
+                                     `REDIRECT_CAUSE_BRANCH;
 
 // csr hazard tracking
-wire        es_csr_we;
-wire [13:0] es_csr_num;
-wire        es_is_ertn;
+wire        ex1_csr_we;
+wire [13:0] ex1_csr_num;
+wire        ex1_is_ertn;
+wire        ex2_csr_we;
+wire [13:0] ex2_csr_num;
+wire        ex2_is_ertn;
 
 // LL/SC reservation state and retirement events
 wire [27:0] sc_query_line;
@@ -780,42 +827,44 @@ llsc_unit u_llsc_unit(
     .reservation_valid       (reservation_valid       )
 );
 
-// IF stage
-if_stage if_stage(
-    .clk            (clk            ),
-    .reset          (reset          ),
-    //allowin
-    .ds_allowin     (ds_allowin     ),
-    //brbus
-    .br_bus         (br_bus         ),
-    // exception
-    .flush          (flush          ),
-    .ex_entry       (ex_entry       ),
-    // ertn
-    .ertn_flush     (ertn_flush     ),
-    .ertn_pc        (ertn_pc        ),
-    .ibar_flush     (ibar_flush     ),
-    .ibar_target    (ibar_target    ),
-    .idle_wait      (idle_wait      ),
-    // address translation
-    .inst_vaddr     (inst_vaddr     ),
-    .inst_paddr     (inst_paddr     ),
-    .inst_trans_ex  (inst_trans_ex  ),
-    .inst_trans_ecode(inst_trans_ecode),
-    .inst_trans_esubcode(inst_trans_esubcode),
-    //outputs
-    .fs_to_ds_valid (fs_to_ds_valid ),
-    .fs_to_ds_bus   (fs_to_ds_bus   ),
-    // inst sram interface
-    .inst_sram_req    (inst_sram_req   ),
-    .inst_sram_wr     (inst_sram_wr    ),
-    .inst_sram_size   (inst_sram_size  ),
-    .inst_sram_wstrb  (inst_sram_wstrb ),
-    .inst_sram_addr   (inst_sram_addr  ),
-    .inst_sram_wdata  (inst_sram_wdata ),
-    .inst_sram_addr_ok(inst_sram_addr_ok),
-    .inst_sram_data_ok(inst_sram_data_ok),
-    .inst_sram_rdata  (inst_sram_rdata )
+// IF1 stage: PC selection, request issue, and redirect cancellation.
+if1_stage if1_stage(
+    .clk                 (clk                 ),
+    .reset               (reset               ),
+    .if2_allowin         (if2_allowin         ),
+    .redirect_valid      (redirect_valid      ),
+    .redirect_pc         (redirect_pc         ),
+    .redirect_cause      (redirect_cause      ),
+    .idle_wait           (idle_wait           ),
+    .inst_vaddr          (inst_vaddr          ),
+    .inst_paddr          (inst_paddr          ),
+    .inst_trans_ex       (inst_trans_ex       ),
+    .inst_trans_ecode    (inst_trans_ecode    ),
+    .inst_trans_esubcode (inst_trans_esubcode ),
+    .if1_to_if2_valid    (if1_to_if2_valid    ),
+    .if1_to_if2_bus      (if1_to_if2_bus      ),
+    .inst_sram_req       (inst_sram_req       ),
+    .inst_sram_wr        (inst_sram_wr        ),
+    .inst_sram_size      (inst_sram_size      ),
+    .inst_sram_wstrb     (inst_sram_wstrb     ),
+    .inst_sram_addr      (inst_sram_addr      ),
+    .inst_sram_wdata     (inst_sram_wdata     ),
+    .inst_sram_addr_ok   (inst_sram_addr_ok   )
+);
+
+// IF2 stage: response wait/filtering and instruction packing for ID.
+if2_stage if2_stage(
+    .clk                 (clk                 ),
+    .reset               (reset               ),
+    .ds_allowin          (ds_allowin          ),
+    .if2_allowin         (if2_allowin         ),
+    .redirect            (redirect_valid      ),
+    .if1_to_if2_valid    (if1_to_if2_valid    ),
+    .if1_to_if2_bus      (if1_to_if2_bus      ),
+    .fs_to_ds_valid      (fs_to_ds_valid      ),
+    .fs_to_ds_bus        (fs_to_ds_bus        ),
+    .inst_sram_data_ok   (inst_sram_data_ok   ),
+    .inst_sram_rdata     (inst_sram_rdata     )
 );
 
 // ID stage
@@ -838,36 +887,65 @@ id_stage id_stage(
     //to rf: for write back
     .ws_to_rf_bus   (ws_to_rf_bus   ),
     //hazard detect info
-    .es_to_ds_dest  (es_to_ds_dest  ),
+    .ex1_to_ds_dest (ex1_to_ds_dest ),
+    .ex2_to_ds_dest (ex2_to_ds_dest ),
     .ms_to_ds_dest  (ms_to_ds_dest  ),
     .ws_to_ds_dest  (ws_to_ds_dest  ),
-    .es_to_ds_load_op(es_to_ds_load_op),
-    .ms_to_ds_load_op(ms_to_ds_load_op),
-    .ms_to_ds_load_dest(ms_to_ds_load_dest),
-    .es_to_ds_result(es_to_ds_result),
+    .ex1_to_ds_result_ready(ex1_to_ds_result_ready),
+    .ex2_to_ds_result_ready(ex2_to_ds_result_ready),
+    .ms_to_ds_result_ready(ms_to_ds_result_ready),
+    .ws_to_ds_result_ready(ws_to_ds_result_ready),
+    .ex1_to_ds_result(ex1_to_ds_result),
+    .ex2_to_ds_result(ex2_to_ds_result),
     .ms_to_ds_result(ms_to_ds_result),
     .ws_to_ds_result(ws_to_ds_result),
     // csr hazard tracking
-    .es_csr_we      (es_csr_we      ),
-    .es_csr_num     (es_csr_num     ),
-    .es_is_ertn     (es_is_ertn     ),
+    .ex1_csr_we     (ex1_csr_we     ),
+    .ex1_csr_num    (ex1_csr_num    ),
+    .ex1_is_ertn    (ex1_is_ertn    ),
+    .ex2_csr_we     (ex2_csr_we     ),
+    .ex2_csr_num    (ex2_csr_num    ),
+    .ex2_is_ertn    (ex2_is_ertn    ),
     .ertn_flush     (ertn_flush     )
 );
 
-// EXE stage
-exe_stage exe_stage(
+// EX1 stage: early ALU, virtual address, and store-data preparation.
+ex1_stage ex1_stage(
+    .clk            (clk            ),
+    .reset          (reset          ),
+    .flush          (flush          ),
+    .ertn_flush     (ertn_flush     ),
+    .ibar_flush     (ibar_flush     ),
+    .ex2_empty      (ex2_empty      ),
+    .ex2_allowin    (ex2_allowin    ),
+    .ex1_allowin    (ex1_allowin    ),
+    .id_to_ex1_valid(id_to_ex1_valid),
+    .id_to_ex1_bus  (id_to_ex1_bus  ),
+    .ex1_to_ex2_valid(ex1_to_ex2_valid),
+    .ex1_to_ex2_bus (ex1_to_ex2_bus ),
+    .ex1_to_ds_dest (ex1_to_ds_dest ),
+    .ex1_to_ds_result_ready(ex1_to_ds_result_ready),
+    .ex1_to_ds_result(ex1_to_ds_result),
+    .ex1_csr_we     (ex1_csr_we     ),
+    .ex1_csr_num    (ex1_csr_num    ),
+    .ex1_is_ertn    (ex1_is_ertn    )
+);
+
+// EX2 stage: privileged state, exceptions, translation, and memory requests.
+ex2_stage ex2_stage(
     .clk            (clk            ),
     .reset          (reset          ),
     //allowin
     .ms_allowin     (ms_allowin     ),
     .older_pipe_empty(ms_empty && ws_empty),
-    .es_allowin     (es_allowin     ),
-    //from ds
-    .ds_to_es_valid (ds_to_es_valid ),
-    .ds_to_es_bus   (ds_to_es_bus   ),
+    .ex2_allowin    (ex2_allowin    ),
+    .ex2_empty      (ex2_empty      ),
+    //from ex1
+    .ex1_to_ex2_valid(ex1_to_ex2_valid),
+    .ex1_to_ex2_bus (ex1_to_ex2_bus ),
     //to ms
-    .es_to_ms_valid (es_to_ms_valid ),
-    .es_to_ms_bus   (es_to_ms_bus   ),
+    .ex2_to_mem_valid(ex2_to_mem_valid),
+    .ex2_to_mem_bus (ex2_to_mem_bus ),
     // data sram interface
     .data_sram_req    (data_sram_req   ),
     .data_sram_wr     (data_sram_wr    ),
@@ -893,9 +971,9 @@ exe_stage exe_stage(
     .ibar_target      (ibar_target      ),
     .idle_wait        (idle_wait        ),
     // hazard detect info
-    .es_to_ds_dest  (es_to_ds_dest  ),
-    .es_to_ds_load_op(es_to_ds_load_op),
-    .es_to_ds_result(es_to_ds_result),
+    .es_to_ds_dest  (ex2_to_ds_dest ),
+    .es_to_ds_result_ready(ex2_to_ds_result_ready),
+    .es_to_ds_result(ex2_to_ds_result),
     // exception interface
     .flush          (flush          ),
     .ex_entry       (ex_entry       ),
@@ -909,9 +987,9 @@ exe_stage exe_stage(
     .inst_trans_ecode(inst_trans_ecode),
     .inst_trans_esubcode(inst_trans_esubcode),
     // csr hazard tracking
-    .es_csr_we      (es_csr_we      ),
-    .es_csr_num     (es_csr_num     ),
-    .es_is_ertn     (es_is_ertn     ),
+    .es_csr_we      (ex2_csr_we     ),
+    .es_csr_num     (ex2_csr_num    ),
+    .es_is_ertn     (ex2_is_ertn    ),
     .sc_query_line  (sc_query_line  ),
     .sc_query_cached(sc_query_cached),
     .sc_can_store   (sc_can_store   ),
@@ -945,8 +1023,7 @@ mem_stage mem_stage(
     .mem_commit_line(mem_commit_line),
     // hazard detect info
     .ms_to_ds_dest  (ms_to_ds_dest  ),
-    .ms_to_ds_load_op(ms_to_ds_load_op),
-    .ms_to_ds_load_dest(ms_to_ds_load_dest),
+    .ms_to_ds_result_ready(ms_to_ds_result_ready),
     .ms_to_ds_result(ms_to_ds_result)
 );
 
@@ -964,6 +1041,7 @@ wb_stage wb_stage(
     .ws_to_rf_bus   (ws_to_rf_bus   ),
     // hazard detect info
     .ws_to_ds_dest  (ws_to_ds_dest  ),
+    .ws_to_ds_result_ready(ws_to_ds_result_ready),
     .ws_to_ds_result(ws_to_ds_result),
     // trace debug interface
     .debug_wb_pc      (debug_wb_pc      ),
@@ -976,11 +1054,10 @@ wb_stage wb_stage(
 // Keep the instruction and side-effect information beside the normal
 // pipeline. The architectural state is reported one cycle after WB so that
 // the register-file nonblocking write has already taken effect.
-reg [31:0] diff_es_instr;
 reg [31:0] diff_ms_instr;
 reg [31:0] diff_ms_paddr;
 reg [31:0] diff_ms_vaddr;
-reg [31:0] diff_ms_store_data;
+reg [63:0] diff_ms_store_data;
 reg [ 7:0] diff_ms_store_valid;
 reg [ 7:0] diff_ms_load_valid;
 reg        diff_ms_excp;
@@ -997,7 +1074,7 @@ reg [31:0] diff_ms_csr_data;
 reg [31:0] diff_ws_instr;
 reg [31:0] diff_ws_paddr;
 reg [31:0] diff_ws_vaddr;
-reg [31:0] diff_ws_store_data;
+reg [63:0] diff_ws_store_data;
 reg [ 7:0] diff_ws_store_valid;
 reg [ 7:0] diff_ws_load_valid;
 reg        diff_ws_excp;
@@ -1025,7 +1102,6 @@ reg        diff_commit_cntinst;
 reg [63:0] diff_commit_timer;
 reg        diff_commit_csr_rstat;
 reg [31:0] diff_commit_csr_data;
-reg        diff_eret;
 reg [ 5:0] diff_excp_ecode;
 reg [31:0] diff_excp_pc;
 reg [31:0] diff_excp_instr;
@@ -1035,13 +1111,14 @@ reg        diff_excp_wait_commit;
 reg [ 7:0] diff_store_valid;
 reg [31:0] diff_store_paddr;
 reg [31:0] diff_store_vaddr;
-reg [31:0] diff_store_data;
+reg [63:0] diff_store_data;
 reg [ 7:0] diff_load_valid;
 reg [31:0] diff_load_paddr;
 reg [31:0] diff_load_vaddr;
 
-wire [5:0] diff_mem_opcode = diff_es_instr[31:26];
-wire [3:0] diff_mem_subop  = diff_es_instr[25:22];
+wire [31:0] diff_ex2_current_instr = ex2_stage.es_inst;
+wire [5:0] diff_mem_opcode = diff_ex2_current_instr[31:26];
+wire [3:0] diff_mem_subop  = diff_ex2_current_instr[25:22];
 wire       diff_is_ld_b    = (diff_mem_opcode == 6'h0a) && (diff_mem_subop == 4'h0);
 wire       diff_is_ld_h    = (diff_mem_opcode == 6'h0a) && (diff_mem_subop == 4'h1);
 wire       diff_is_ld_w    = (diff_mem_opcode == 6'h0a) && (diff_mem_subop == 4'h2);
@@ -1050,21 +1127,53 @@ wire       diff_is_st_h    = (diff_mem_opcode == 6'h0a) && (diff_mem_subop == 4'
 wire       diff_is_st_w    = (diff_mem_opcode == 6'h0a) && (diff_mem_subop == 4'h6);
 wire       diff_is_ld_bu   = (diff_mem_opcode == 6'h0a) && (diff_mem_subop == 4'h8);
 wire       diff_is_ld_hu   = (diff_mem_opcode == 6'h0a) && (diff_mem_subop == 4'h9);
-wire       diff_is_ll_w    = diff_es_instr[31:24] == 8'h20;
-wire       diff_is_sc_w    = diff_es_instr[31:24] == 8'h21;
-wire       diff_es_idle    = (diff_es_instr[31:15] == 17'h0c91);
+wire       diff_is_ll_w    = diff_ex2_current_instr[31:24] == 8'h20;
+wire       diff_is_sc_w    = diff_ex2_current_instr[31:24] == 8'h21;
+wire       diff_ex2_idle   = (diff_ex2_current_instr[31:15] == 17'h0c91);
 wire       diff_ws_idle    = (diff_ws_instr[31:15] == 17'h0c91);
-wire [7:0] diff_es_store_valid = {5'b0,
-                                  diff_is_st_w || (diff_is_sc_w && exe_stage.sc_success),
-                                  diff_is_st_h, diff_is_st_b};
-wire [7:0] diff_es_load_valid  = {3'b0, diff_is_ld_w || diff_is_ll_w, diff_is_ld_hu,
-                                  diff_is_ld_h, diff_is_ld_bu, diff_is_ld_b};
-wire       diff_excp_fire = diff_excp_pending &&
-                            (!diff_excp_wait_commit || diff_commit_valid);
+wire       diff_is_store = diff_is_st_b || diff_is_st_h || diff_is_st_w ||
+                           (diff_is_sc_w && ex2_stage.sc_success);
+wire       diff_is_load  = diff_is_ld_b || diff_is_ld_h || diff_is_ld_w ||
+                           diff_is_ld_bu || diff_is_ld_hu || diff_is_ll_w;
+wire [3:0] diff_ex2_store_wstrb =
+           diff_is_st_b ? (4'b0001 << ex2_stage.data_vaddr[1:0]) :
+           diff_is_st_h ? (ex2_stage.data_vaddr[1] ? 4'b1100 : 4'b0011) :
+           (diff_is_st_w || (diff_is_sc_w && ex2_stage.sc_success)) ? 4'b1111 :
+                                                                       4'b0000;
+wire [31:0] diff_ex2_store_data32 =
+            ex2_stage.data_sram_wdata &
+            {{8{diff_ex2_store_wstrb[3]}},
+             {8{diff_ex2_store_wstrb[2]}},
+             {8{diff_ex2_store_wstrb[1]}},
+             {8{diff_ex2_store_wstrb[0]}}};
+wire [63:0] diff_ex2_store_data =
+            {32'b0, diff_ex2_store_data32};
+wire [3:0] diff_ex2_load_wstrb =
+           (diff_is_ld_b || diff_is_ld_bu) ? (4'b0001 << ex2_stage.data_vaddr[1:0]) :
+           (diff_is_ld_h || diff_is_ld_hu) ? (ex2_stage.data_vaddr[1] ? 4'b1100 : 4'b0011) :
+           (diff_is_ld_w || diff_is_ll_w)  ? 4'b1111 :
+                                             4'b0000;
+wire       diff_ex2_store_fire = diff_is_store && ex2_stage.es_mem_access &&
+                                 ex2_stage.actual_mem_we;
+wire       diff_ex2_load_fire  = diff_is_load && ex2_stage.es_mem_access &&
+                                 ex2_stage.res_from_mem;
+wire [7:0] diff_ex2_store_valid = diff_ex2_store_fire ? (ex2_stage.data_paddr[2] ?
+                                                        {diff_ex2_store_wstrb, 4'b0} :
+                                                        {4'b0, diff_ex2_store_wstrb}) : 8'b0;
+wire [7:0] diff_ex2_load_valid  = diff_ex2_load_fire  ? (ex2_stage.data_paddr[2] ?
+                                                        {diff_ex2_load_wstrb, 4'b0} :
+                                                        {4'b0, diff_ex2_load_wstrb}) : 8'b0;
+wire       diff_excp_fire = diff_excp_pending && !diff_excp_wait_commit;
+wire       diff_eret_fire = wb_stage.ws_valid && diff_ws_ertn;
+wire [31:0] diff_event_pc = diff_eret_fire ? wb_stage.ws_pc : diff_excp_pc;
+wire [31:0] diff_event_instr = diff_eret_fire ? diff_ws_instr : diff_excp_instr;
+wire       diff_reservation_valid_after_mem =
+           ll_commit_valid               ? 1'b1 :
+           u_llsc_unit.reservation_clear ? 1'b0 :
+                                           reservation_valid;
 
 always @(posedge clk) begin
     if (reset) begin
-        diff_es_instr          <= 32'b0;
         diff_ms_instr          <= 32'b0;
         diff_ms_paddr          <= 32'b0;
         diff_ms_vaddr          <= 32'b0;
@@ -1111,7 +1220,6 @@ always @(posedge clk) begin
         diff_commit_timer      <= 64'b0;
         diff_commit_csr_rstat  <= 1'b0;
         diff_commit_csr_data   <= 32'b0;
-        diff_eret              <= 1'b0;
         diff_excp_ecode        <= 6'b0;
         diff_excp_pc           <= 32'b0;
         diff_excp_instr        <= 32'b0;
@@ -1127,31 +1235,24 @@ always @(posedge clk) begin
         diff_load_vaddr        <= 32'b0;
     end
     else begin
-        if (ds_to_es_valid && es_allowin)
-            diff_es_instr <= id_stage.ds_inst;
-
-        if (es_to_ms_valid && ms_allowin) begin
-            diff_ms_instr         <= diff_es_instr;
-            diff_ms_paddr         <= exe_stage.data_paddr;
-            diff_ms_vaddr         <= exe_stage.data_vaddr;
-            diff_ms_store_data    <= exe_stage.data_sram_wdata &
-                                     {{8{exe_stage.data_sram_wstrb[3]}},
-                                      {8{exe_stage.data_sram_wstrb[2]}},
-                                      {8{exe_stage.data_sram_wstrb[1]}},
-                                      {8{exe_stage.data_sram_wstrb[0]}}};
-            diff_ms_store_valid   <= diff_es_store_valid;
-            diff_ms_load_valid    <= diff_es_load_valid;
-            diff_ms_excp          <= exe_stage.wb_ex;
-            diff_ms_ertn          <= exe_stage.ertn_flush;
-            diff_ms_ecode         <= exe_stage.wb_ecode;
-            diff_ms_estat         <= exe_stage.u_csr_regfile.estat;
-            diff_ms_tlbfill       <= exe_stage.tlbfill_fire;
-            diff_ms_tlbfill_index <= exe_stage.tlb_write_index;
-            diff_ms_cntinst       <= exe_stage.ds_rdcntv || exe_stage.ds_rdcntid;
-            diff_ms_timer         <= exe_stage.u_csr_regfile.stable_counter;
-            diff_ms_csr_rstat     <= exe_stage.is_csr &&
-                                     (exe_stage.csr_num == 14'h005);
-            diff_ms_csr_data      <= exe_stage.csr_rvalue;
+        if (ex2_to_mem_valid && ms_allowin) begin
+            diff_ms_instr         <= diff_ex2_current_instr;
+            diff_ms_paddr         <= ex2_stage.data_paddr;
+            diff_ms_vaddr         <= ex2_stage.data_vaddr;
+            diff_ms_store_data    <= diff_ex2_store_data;
+            diff_ms_store_valid   <= diff_ex2_store_valid;
+            diff_ms_load_valid    <= diff_ex2_load_valid;
+            diff_ms_excp          <= ex2_stage.wb_ex;
+            diff_ms_ertn          <= ex2_stage.ertn_flush;
+            diff_ms_ecode         <= ex2_stage.wb_ecode;
+            diff_ms_estat         <= ex2_stage.u_csr_regfile.estat;
+            diff_ms_tlbfill       <= ex2_stage.tlbfill_fire;
+            diff_ms_tlbfill_index <= ex2_stage.tlb_write_index;
+            diff_ms_cntinst       <= ex2_stage.ds_rdcntv || ex2_stage.ds_rdcntid;
+            diff_ms_timer         <= ex2_stage.u_csr_regfile.stable_counter;
+            diff_ms_csr_rstat     <= ex2_stage.is_csr &&
+                                     (ex2_stage.csr_num == 14'h005);
+            diff_ms_csr_data      <= ex2_stage.csr_rvalue;
         end
 
         if (ms_to_ws_valid && ws_allowin) begin
@@ -1172,7 +1273,7 @@ always @(posedge clk) begin
             diff_ws_csr_rstat     <= diff_ms_csr_rstat;
             diff_ws_csr_data      <= diff_ms_csr_data;
             diff_ws_llbctl        <= {llbctl_klo, 1'b0,
-                                      reservation_valid};
+                                      diff_reservation_valid_after_mem};
         end
 
         // IDLE retires before its wake-up interrupt is reported. Without this
@@ -1193,14 +1294,18 @@ always @(posedge clk) begin
         diff_commit_csr_rstat     <= diff_ws_csr_rstat;
         diff_commit_csr_data      <= diff_ws_csr_data;
 
-        diff_eret       <= 1'b0;
-        if (exe_stage.wb_ex) begin
+        if (ex2_stage.wb_ex) begin
             diff_excp_pending     <= 1'b1;
-            diff_excp_wait_commit <= mem_stage.ms_valid || diff_es_idle;
-            diff_excp_ecode       <= exe_stage.wb_ecode;
-            diff_excp_pc          <= exe_stage.wb_pc;
-            diff_excp_instr       <= diff_es_instr;
-            diff_excp_estat       <= exe_stage.u_csr_regfile.estat;
+            diff_excp_wait_commit <= mem_stage.ms_valid || wb_stage.ws_valid ||
+                                     diff_ex2_idle;
+            diff_excp_ecode       <= ex2_stage.wb_ecode;
+            diff_excp_pc          <= ex2_stage.wb_pc;
+            diff_excp_instr       <= diff_ex2_current_instr;
+            diff_excp_estat       <= ex2_stage.u_csr_regfile.estat;
+        end
+        else if (diff_excp_pending && diff_excp_wait_commit &&
+                 diff_commit_valid) begin
+            diff_excp_wait_commit <= 1'b0;
         end
         else if (diff_excp_fire) begin
             diff_excp_pending     <= 1'b0;
@@ -1242,11 +1347,11 @@ DifftestExcpEvent u_difftest_excp_event(
     .clock         (clk),
     .coreid        (8'd0),
     .excp_valid    (diff_excp_fire),
-    .eret          (diff_eret),
+    .eret          (1'b0),
     .intrNo        ({21'b0, diff_excp_estat[12:2]}),
     .cause         ({26'b0, diff_excp_ecode}),
-    .exceptionPC   ({32'b0, diff_excp_pc}),
-    .exceptionInst (diff_excp_instr)
+    .exceptionPC   ({32'b0, diff_event_pc}),
+    .exceptionInst (diff_event_instr)
 );
 
 DifftestTrapEvent u_difftest_trap_event(
@@ -1266,7 +1371,7 @@ DifftestStoreEvent u_difftest_store_event(
     .valid      (diff_store_valid),
     .storePAddr ({32'b0, diff_store_paddr}),
     .storeVAddr ({32'b0, diff_store_vaddr}),
-    .storeData  ({32'b0, diff_store_data})
+    .storeData  (diff_store_data)
 );
 
 DifftestLoadEvent u_difftest_load_event(
@@ -1281,33 +1386,33 @@ DifftestLoadEvent u_difftest_load_event(
 DifftestCSRRegState u_difftest_csr_state(
     .clock      (clk),
     .coreid     (8'd0),
-    .crmd       ({32'b0, exe_stage.u_csr_regfile.crmd}),
-    .prmd       ({32'b0, exe_stage.u_csr_regfile.prmd}),
+    .crmd       ({32'b0, ex2_stage.u_csr_regfile.crmd}),
+    .prmd       ({32'b0, ex2_stage.u_csr_regfile.prmd}),
     .euen       (64'b0),
-    .ecfg       ({32'b0, exe_stage.u_csr_regfile.ecfg}),
-    .estat      ({32'b0, exe_stage.u_csr_regfile.estat}),
-    .era        ({32'b0, exe_stage.u_csr_regfile.era}),
-    .badv       ({32'b0, exe_stage.u_csr_regfile.badv}),
-    .eentry     ({32'b0, exe_stage.u_csr_regfile.eentry}),
-    .tlbidx     ({32'b0, exe_stage.u_csr_regfile.tlbidx}),
-    .tlbehi     ({32'b0, exe_stage.u_csr_regfile.tlbehi}),
-    .tlbelo0    ({32'b0, exe_stage.u_csr_regfile.tlbelo0}),
-    .tlbelo1    ({32'b0, exe_stage.u_csr_regfile.tlbelo1}),
-    .asid       ({32'b0, 8'b0, 8'd10, 6'b0, exe_stage.u_csr_regfile.asid}),
+    .ecfg       ({32'b0, ex2_stage.u_csr_regfile.ecfg}),
+    .estat      ({32'b0, ex2_stage.u_csr_regfile.estat}),
+    .era        ({32'b0, ex2_stage.u_csr_regfile.era}),
+    .badv       ({32'b0, ex2_stage.u_csr_regfile.badv}),
+    .eentry     ({32'b0, ex2_stage.u_csr_regfile.eentry}),
+    .tlbidx     ({32'b0, ex2_stage.u_csr_regfile.tlbidx}),
+    .tlbehi     ({32'b0, ex2_stage.u_csr_regfile.tlbehi}),
+    .tlbelo0    ({32'b0, ex2_stage.u_csr_regfile.tlbelo0}),
+    .tlbelo1    ({32'b0, ex2_stage.u_csr_regfile.tlbelo1}),
+    .asid       ({32'b0, 8'b0, 8'd10, 6'b0, ex2_stage.u_csr_regfile.asid}),
     .pgdl       (64'b0),
     .pgdh       (64'b0),
-    .save0      ({32'b0, exe_stage.u_csr_regfile.save0}),
-    .save1      ({32'b0, exe_stage.u_csr_regfile.save1}),
-    .save2      ({32'b0, exe_stage.u_csr_regfile.save2}),
-    .save3      ({32'b0, exe_stage.u_csr_regfile.save3}),
-    .tid        ({32'b0, exe_stage.u_csr_regfile.tid}),
-    .tcfg       ({32'b0, exe_stage.u_csr_regfile.tcfg}),
-    .tval       ({32'b0, exe_stage.u_csr_regfile.tval}),
+    .save0      ({32'b0, ex2_stage.u_csr_regfile.save0}),
+    .save1      ({32'b0, ex2_stage.u_csr_regfile.save1}),
+    .save2      ({32'b0, ex2_stage.u_csr_regfile.save2}),
+    .save3      ({32'b0, ex2_stage.u_csr_regfile.save3}),
+    .tid        ({32'b0, ex2_stage.u_csr_regfile.tid}),
+    .tcfg       ({32'b0, ex2_stage.u_csr_regfile.tcfg}),
+    .tval       ({32'b0, ex2_stage.u_csr_regfile.tval}),
     .ticlr      (64'b0),
     .llbctl     ({61'b0, diff_commit_llbctl}),
-    .tlbrentry  ({32'b0, exe_stage.u_csr_regfile.tlbrentry}),
-    .dmw0       ({32'b0, exe_stage.u_csr_regfile.dmw0}),
-    .dmw1       ({32'b0, exe_stage.u_csr_regfile.dmw1})
+    .tlbrentry  ({32'b0, ex2_stage.u_csr_regfile.tlbrentry}),
+    .dmw0       ({32'b0, ex2_stage.u_csr_regfile.dmw0}),
+    .dmw1       ({32'b0, ex2_stage.u_csr_regfile.dmw1})
 );
 
 DifftestGRegState u_difftest_gpr_state(

@@ -144,6 +144,7 @@ wire [29:0] timer_init   = tcfg[31:2];
 reg         timer_pending;
 wire        timer_eq_zero = (tval == 32'b0);
 wire        timer_will_expire = timer_en && (tval == 32'h1);
+wire        csr_inst_we = csr_we && !wb_ex;
 
 // ============================================================
 // Output assignments
@@ -233,7 +234,6 @@ end
 // ============================================================
 // CSR write data (masked, for non-exception writes)
 // ============================================================
-wire csr_inst_we = csr_we && !wb_ex;
 wire [31:0] crmd_wdata   = (crmd   & ~csr_wmask) | (csr_wvalue & csr_wmask);
 wire [31:0] prmd_wdata   = (prmd   & ~csr_wmask) | (csr_wvalue & csr_wmask);
 wire [31:0] ecfg_wdata   = (ecfg   & ~csr_wmask) | (csr_wvalue & csr_wmask);

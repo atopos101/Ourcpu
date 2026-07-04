@@ -18,6 +18,7 @@ module wb_stage(
     output wire [31:0] debug_wb_rf_wdata,
     // 写回级目的操作数寄存器号
     output wire [4:0] ws_to_ds_dest,
+    output wire       ws_to_ds_result_ready,
     // 数据前递
     output wire [31:0] ws_to_ds_result
 );
@@ -86,6 +87,7 @@ assign debug_wb_rf_wnum  = ws_debug_valid ? ws_dest         : 5'b0;
 assign debug_wb_rf_wdata = ws_debug_valid ? ws_final_result : 32'b0;
 
 assign ws_to_ds_dest = ws_dest & {5{ws_valid}} & {5{ws_gr_we}};
+assign ws_to_ds_result_ready = ws_valid && ws_gr_we;
 assign ws_to_ds_result = ws_final_result;
 
 endmodule

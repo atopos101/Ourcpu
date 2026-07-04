@@ -30,8 +30,7 @@ module mem_stage(
 
     // forward
     output [4:0]                   ms_to_ds_dest,
-    output                         ms_to_ds_load_op,
-    output [4:0]                   ms_to_ds_load_dest,
+    output                         ms_to_ds_result_ready,
     output [31:0]                  ms_to_ds_result
 );
 
@@ -196,11 +195,10 @@ assign ms_to_ws_bus = {
 
 assign ms_to_ds_dest =
        ms_dest
-    & {5{ms_to_ws_valid}}
+    & {5{ms_valid}}
     & {5{ms_gr_we}};
 
-assign ms_to_ds_load_op = ms_valid && (ms_res_from_mem || ms_inst_sc_w) && !ms_ready_go;
-assign ms_to_ds_load_dest = ms_dest;
+assign ms_to_ds_result_ready = ms_to_ws_valid && ms_gr_we;
 
 assign ms_to_ds_result = ms_final_result;
 

@@ -19,19 +19,25 @@ module id_stage(
     //to rf: for write back
     input  [`WS_TO_RF_BUS_WD -1:0] ws_to_rf_bus  ,
     // hazard detect
-    input [4:0] es_to_ds_dest,
+    input [4:0] ex1_to_ds_dest,
+    input [4:0] ex2_to_ds_dest,
     input [4:0] ms_to_ds_dest,
     input [4:0] ws_to_ds_dest,
-    input es_to_ds_load_op,
-    input ms_to_ds_load_op,
-    input [4:0] ms_to_ds_load_dest,
-    input [31:0] es_to_ds_result,
+    input       ex1_to_ds_result_ready,
+    input       ex2_to_ds_result_ready,
+    input       ms_to_ds_result_ready,
+    input       ws_to_ds_result_ready,
+    input [31:0] ex1_to_ds_result,
+    input [31:0] ex2_to_ds_result,
     input [31:0] ms_to_ds_result,
     input [31:0] ws_to_ds_result,
-    // csr hazard tracking from exe
-    input        es_csr_we,
-    input [13:0] es_csr_num,
-    input        es_is_ertn,
+    // csr hazard tracking from EX1/EX2
+    input        ex1_csr_we,
+    input [13:0] ex1_csr_num,
+    input        ex1_is_ertn,
+    input        ex2_csr_we,
+    input [13:0] ex2_csr_num,
+    input        ex2_is_ertn,
     // ertn flush
     input        ertn_flush
 );
@@ -173,7 +179,7 @@ wire rk_wait;
 wire rd_wait;
 
 wire br_stall;
-wire load_stall;
+wire producer_not_ready_stall;
 wire rj_eq_rd;
 wire rj_lt_rd;
 wire rj_ltu_rd;
@@ -490,13 +496,35 @@ regfile u_regfile(
     .wdata  (rf_wdata )
     );
 
-assign rj_value  = rj_wait ? ((rj == es_to_ds_dest) ? es_to_ds_result :
-                             ((rj == ms_to_ds_dest) ? ms_to_ds_result : ws_to_ds_result))
-                           : rf_rdata1;
-assign rkd_value = rk_wait ? ((rk == es_to_ds_dest) ? es_to_ds_result :
-                             ((rk == ms_to_ds_dest) ? ms_to_ds_result : ws_to_ds_result)) :
-                   rd_wait ? ((rd == es_to_ds_dest) ? es_to_ds_result :
-                             ((rd == ms_to_ds_dest) ? ms_to_ds_result : ws_to_ds_result)) :
+wire rj_hit_ex1 = ~src_no_rj && (rj != 5'b00000) && (rj == ex1_to_ds_dest);
+wire rj_hit_ex2 = ~src_no_rj && (rj != 5'b00000) && (rj == ex2_to_ds_dest);
+wire rj_hit_ms  = ~src_no_rj && (rj != 5'b00000) && (rj == ms_to_ds_dest);
+wire rj_hit_ws  = ~src_no_rj && (rj != 5'b00000) && (rj == ws_to_ds_dest);
+wire rk_hit_ex1 = ~src_no_rk && (rk != 5'b00000) && (rk == ex1_to_ds_dest);
+wire rk_hit_ex2 = ~src_no_rk && (rk != 5'b00000) && (rk == ex2_to_ds_dest);
+wire rk_hit_ms  = ~src_no_rk && (rk != 5'b00000) && (rk == ms_to_ds_dest);
+wire rk_hit_ws  = ~src_no_rk && (rk != 5'b00000) && (rk == ws_to_ds_dest);
+wire rd_hit_ex1 = ~src_no_rd && (rd != 5'b00000) && (rd == ex1_to_ds_dest);
+wire rd_hit_ex2 = ~src_no_rd && (rd != 5'b00000) && (rd == ex2_to_ds_dest);
+wire rd_hit_ms  = ~src_no_rd && (rd != 5'b00000) && (rd == ms_to_ds_dest);
+wire rd_hit_ws  = ~src_no_rd && (rd != 5'b00000) && (rd == ws_to_ds_dest);
+
+wire [31:0] rj_forward_result = rj_hit_ex1 ? ex1_to_ds_result :
+                                rj_hit_ex2 ? ex2_to_ds_result :
+                                rj_hit_ms  ? ms_to_ds_result  :
+                                             ws_to_ds_result;
+wire [31:0] rk_forward_result = rk_hit_ex1 ? ex1_to_ds_result :
+                                rk_hit_ex2 ? ex2_to_ds_result :
+                                rk_hit_ms  ? ms_to_ds_result  :
+                                             ws_to_ds_result;
+wire [31:0] rd_forward_result = rd_hit_ex1 ? ex1_to_ds_result :
+                                rd_hit_ex2 ? ex2_to_ds_result :
+                                rd_hit_ms  ? ms_to_ds_result  :
+                                             ws_to_ds_result;
+
+assign rj_value  = rj_wait ? rj_forward_result : rf_rdata1;
+assign rkd_value = rk_wait ? rk_forward_result :
+                   rd_wait ? rd_forward_result :
                    rf_rdata2;
 
 // ============================================================
@@ -539,30 +567,28 @@ assign src_no_rk = inst_slli_w | inst_srli_w | inst_srai_w | inst_addi_w | load_
 assign src_no_rd = inst_dbar | inst_ibar | inst_idle |
                    (~store_op & ~branch_op & ~inst_csrwr & ~inst_csrxchg);
 
-assign rj_wait = ~src_no_rj && (rj != 5'b00000)
-                 && ((rj == es_to_ds_dest) || (rj == ms_to_ds_dest) || (rj == ws_to_ds_dest));
-assign rk_wait = ~src_no_rk && (rk != 5'b00000)
-                 && ((rk == es_to_ds_dest) || (rk == ms_to_ds_dest) || (rk == ws_to_ds_dest));
-assign rd_wait = ~src_no_rd && (rd != 5'b00000)
-                 && ((rd == es_to_ds_dest) || (rd == ms_to_ds_dest) || (rd == ws_to_ds_dest));
+assign rj_wait = rj_hit_ex1 || rj_hit_ex2 || rj_hit_ms || rj_hit_ws;
+assign rk_wait = rk_hit_ex1 || rk_hit_ex2 || rk_hit_ms || rk_hit_ws;
+assign rd_wait = rd_hit_ex1 || rd_hit_ex2 || rd_hit_ms || rd_hit_ws;
 
 assign br_target = (branch_op || inst_bl || inst_b) ? (ds_pc + br_offs) :
                                                    /*inst_jirl*/ (rj_value + jirl_offs);
 
-wire es_load_stall;
-wire ms_load_stall;
+wire rj_not_ready = rj_hit_ex1 ? !ex1_to_ds_result_ready :
+                    rj_hit_ex2 ? !ex2_to_ds_result_ready :
+                    rj_hit_ms  ? !ms_to_ds_result_ready  :
+                    rj_hit_ws  ? !ws_to_ds_result_ready  : 1'b0;
+wire rk_not_ready = rk_hit_ex1 ? !ex1_to_ds_result_ready :
+                    rk_hit_ex2 ? !ex2_to_ds_result_ready :
+                    rk_hit_ms  ? !ms_to_ds_result_ready  :
+                    rk_hit_ws  ? !ws_to_ds_result_ready  : 1'b0;
+wire rd_not_ready = rd_hit_ex1 ? !ex1_to_ds_result_ready :
+                    rd_hit_ex2 ? !ex2_to_ds_result_ready :
+                    rd_hit_ms  ? !ms_to_ds_result_ready  :
+                    rd_hit_ws  ? !ws_to_ds_result_ready  : 1'b0;
 
-assign es_load_stall = es_to_ds_load_op & (((rj == es_to_ds_dest) & rj_wait) |
-                                           ((rk == es_to_ds_dest) & rk_wait) |
-                                           ((rd == es_to_ds_dest) & rd_wait));
-
-assign ms_load_stall = ms_to_ds_load_op && (ms_to_ds_load_dest != 5'b0) &&
-                       (((rj == ms_to_ds_load_dest) & ~src_no_rj) |
-                        ((rk == ms_to_ds_load_dest) & ~src_no_rk) |
-                        ((rd == ms_to_ds_load_dest) & ~src_no_rd));
-
-assign load_stall = es_load_stall || ms_load_stall;
-assign br_stall = load_stall & br_taken & ds_valid;
+assign producer_not_ready_stall = rj_not_ready || rk_not_ready || rd_not_ready;
+assign br_stall = producer_not_ready_stall & br_taken & ds_valid;
 assign br_bus = {br_stall, br_taken, br_target};
 
 // ============================================================
@@ -575,18 +601,32 @@ localparam CSR_ERA_NO   = 14'h06;
 localparam CSR_TCFG_NO  = 14'h41;
 localparam CSR_TICLR_NO = 14'h44;
 
-wire ex_writes_int_csr;
-assign ex_writes_int_csr = es_csr_we && (
-    es_csr_num == CSR_CRMD_NO  ||
-    es_csr_num == CSR_ECFG_NO  ||
-    es_csr_num == CSR_TCFG_NO  ||
-    es_csr_num == CSR_TICLR_NO
+wire ex1_writes_int_csr;
+assign ex1_writes_int_csr = ex1_csr_we && (
+    ex1_csr_num == CSR_CRMD_NO  ||
+    ex1_csr_num == CSR_ECFG_NO  ||
+    ex1_csr_num == CSR_TCFG_NO  ||
+    ex1_csr_num == CSR_TICLR_NO
 );
 
-wire ex_writes_ertn_csr;
-assign ex_writes_ertn_csr = es_csr_we && (
-    es_csr_num == CSR_ERA_NO  ||
-    es_csr_num == CSR_PRMD_NO
+wire ex2_writes_int_csr;
+assign ex2_writes_int_csr = ex2_csr_we && (
+    ex2_csr_num == CSR_CRMD_NO  ||
+    ex2_csr_num == CSR_ECFG_NO  ||
+    ex2_csr_num == CSR_TCFG_NO  ||
+    ex2_csr_num == CSR_TICLR_NO
+);
+
+wire ex1_writes_ertn_csr;
+assign ex1_writes_ertn_csr = ex1_csr_we && (
+    ex1_csr_num == CSR_ERA_NO  ||
+    ex1_csr_num == CSR_PRMD_NO
+);
+
+wire ex2_writes_ertn_csr;
+assign ex2_writes_ertn_csr = ex2_csr_we && (
+    ex2_csr_num == CSR_ERA_NO  ||
+    ex2_csr_num == CSR_PRMD_NO
 );
 
 wire id_needs_int_csr  = 1'b1;
@@ -594,9 +634,9 @@ wire id_needs_ertn_csr = inst_ertn;
 
 wire csr_stall;
 assign csr_stall = ds_valid && (
-    (id_needs_int_csr  && ex_writes_int_csr)  ||
-    (id_needs_ertn_csr && ex_writes_ertn_csr) ||
-    (id_needs_int_csr  && es_is_ertn)
+    (id_needs_int_csr  && (ex1_writes_int_csr || ex2_writes_int_csr))   ||
+    (id_needs_ertn_csr && (ex1_writes_ertn_csr || ex2_writes_ertn_csr)) ||
+    (id_needs_int_csr  && (ex1_is_ertn || ex2_is_ertn))
 );
 
 // ============================================================
@@ -644,6 +684,7 @@ assign {rf_we   ,  //37:37
 assign ds_to_es_bus = {ds_ex,
                        ds_ecode,
                        ds_esubcode,
+                       ds_inst,
                        inst_ll_w,
                        inst_sc_w,
                        inst_dbar,
@@ -681,7 +722,7 @@ assign ds_to_es_bus = {ds_ex,
 // ============================================================
 // Pipeline control
 // ============================================================
-assign ds_ready_go    = ds_valid && ~load_stall && ~csr_stall &&
+assign ds_ready_go    = ds_valid && ~producer_not_ready_stall && ~csr_stall &&
                         !flush && !ertn_flush && !ibar_flush;
 assign ds_allowin     = !ds_valid || ds_ready_go && es_allowin;
 assign ds_to_es_valid = ds_valid && ds_ready_go;

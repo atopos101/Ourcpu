@@ -2,11 +2,26 @@
 `define MYCPU_H
 
 `define BR_BUS_WD       34
+
+// Seven-stage pipeline bus widths. Phase 1 keeps the existing five-stage
+// datapath intact and exposes these names as the migration boundary.
+`define IF1_TO_IF2_BUS_WD 49    // {pc[31:0], req_cancel, ex, ecode[5:0], esubcode[8:0]}
+`define IF2_TO_ID_BUS_WD  80    // {inst[31:0], pc[31:0], ex, ecode[5:0], esubcode[8:0]}
+`define ID_TO_EX1_BUS_WD  250   // DS_TO_ES payload + instruction for aligned Difftest sideband
+`define EX1_TO_EX2_BUS_WD 350   // {alu_result, mem_addr, store_wdata, store_wstrb, ID_TO_EX1 payload}
+`define EX2_TO_MEM_BUS_WD 107   // transitional alias of ES_TO_MS payload
+
 `define FS_TO_DS_BUS_WD 80    // {inst[31:0], pc[31:0], fs_ex, fs_ecode, fs_esubcode}
-`define DS_TO_ES_BUS_WD 218   // previous fields + LL.W/SC.W + DBAR/IBAR + IDLE
+`define DS_TO_ES_BUS_WD 250   // previous fields + LL.W/SC.W + DBAR/IBAR + IDLE + instruction
 `define ES_TO_MS_BUS_WD 107   // previous fields + LL/SC metadata
 `define MS_TO_WS_BUS_WD 70    // unchanged
 `define WS_TO_RF_BUS_WD 38    // unchanged
+
+// Pipeline redirect causes, ordered by architectural priority in core_top.
+`define REDIRECT_CAUSE_BRANCH 2'd0
+`define REDIRECT_CAUSE_IBAR   2'd1
+`define REDIRECT_CAUSE_EXCP   2'd2
+`define REDIRECT_CAUSE_ERTN   2'd3
 
 // Exception codes — LoongArch Vol1 §7.4.6 Table 7-8
 `define ECODE_INT      6'h00

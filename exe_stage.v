@@ -1,18 +1,178 @@
 `include "mycpu.vh"
 
-module exe_stage(
+module ex1_stage(
+    input                          clk           ,
+    input                          reset         ,
+    input                          flush         ,
+    input                          ertn_flush    ,
+    input                          ibar_flush    ,
+    input                          ex2_empty     ,
+    input                          ex2_allowin   ,
+    output                         ex1_allowin   ,
+    input                          id_to_ex1_valid,
+    input  [`ID_TO_EX1_BUS_WD -1:0] id_to_ex1_bus,
+    output                         ex1_to_ex2_valid,
+    output [`EX1_TO_EX2_BUS_WD -1:0] ex1_to_ex2_bus,
+    output [4:0]                  ex1_to_ds_dest,
+    output                        ex1_to_ds_result_ready,
+    output [31:0]                 ex1_to_ds_result,
+    output                        ex1_csr_we,
+    output [13:0]                 ex1_csr_num,
+    output                        ex1_is_ertn
+);
+
+reg         ex1_valid;
+reg [`ID_TO_EX1_BUS_WD -1:0] id_to_ex1_bus_r;
+
+wire        ds_ex;
+wire [ 5:0] ds_ecode;
+wire [ 8:0] ds_esubcode;
+wire [31:0] ds_inst;
+wire        inst_ll_w;
+wire        inst_sc_w;
+wire        inst_dbar;
+wire        inst_ibar;
+wire        inst_idle;
+wire        ds_rdcntv;
+wire        ds_rdcntv_hi;
+wire        ds_rdcntid;
+wire [ 2:0] tlb_op;
+wire [ 4:0] invtlb_op;
+wire        inst_cacop;
+wire [ 4:0] cacop_code;
+wire [18:0] alu_op;
+wire        load_op;
+wire [ 1:0] mem_size;
+wire        mem_unsigned;
+wire        src1_is_pc;
+wire        src2_is_imm;
+wire        src2_is_4;
+wire        gr_we;
+wire        mem_we;
+wire [ 4:0] dest;
+wire [31:0] imm;
+wire [31:0] rj_value;
+wire [31:0] rkd_value;
+wire [31:0] ex1_pc;
+wire        res_from_mem;
+wire [ 1:0] csr_op;
+wire [13:0] csr_num;
+wire        inst_syscall;
+wire        inst_ertn;
+
+assign {ds_ex,
+        ds_ecode,
+        ds_esubcode,
+        ds_inst,
+        inst_ll_w,
+        inst_sc_w,
+        inst_dbar,
+        inst_ibar,
+        inst_idle,
+        ds_rdcntv,
+        ds_rdcntv_hi,
+        ds_rdcntid,
+        tlb_op,
+        invtlb_op,
+        inst_cacop,
+        cacop_code,
+        alu_op,
+        load_op,
+        mem_size,
+        mem_unsigned,
+        src1_is_pc,
+        src2_is_imm,
+        src2_is_4,
+        gr_we,
+        mem_we,
+        dest,
+        imm,
+        rj_value,
+        rkd_value,
+        ex1_pc,
+        res_from_mem,
+        csr_op,
+        csr_num,
+        inst_syscall,
+        inst_ertn} = id_to_ex1_bus_r;
+
+wire [31:0] alu_src1 = src1_is_pc  ? ex1_pc : rj_value;
+wire [31:0] alu_src2 = src2_is_imm ? imm    : rkd_value;
+wire [31:0] alu_result;
+wire [31:0] mem_addr = rj_value + imm;
+
+alu u_alu(
+    .alu_op     (alu_op    ),
+    .alu_src1   (alu_src1  ),
+    .alu_src2   (alu_src2  ),
+    .alu_result (alu_result)
+);
+
+wire [3:0] st_b_we    = 4'b0001 << mem_addr[1:0];
+wire [3:0] st_h_we    = mem_addr[1] ? 4'b1100 : 4'b0011;
+wire [3:0] st_w_we    = 4'b1111;
+wire [31:0] st_b_wdata = {4{rkd_value[7:0]}} << {mem_addr[1:0], 3'b000};
+wire [31:0] st_h_wdata = mem_addr[1] ? {rkd_value[15:0], 16'b0} : {16'b0, rkd_value[15:0]};
+wire [31:0] st_w_wdata = rkd_value;
+wire [3:0] store_wstrb = (mem_size == 2'b00) ? st_b_we :
+                         (mem_size == 2'b01) ? st_h_we : st_w_we;
+wire [31:0] store_wdata = (mem_size == 2'b00) ? st_b_wdata :
+                           (mem_size == 2'b01) ? st_h_wdata : st_w_wdata;
+
+assign ex1_to_ex2_valid = ex1_valid;
+assign ex1_to_ex2_bus   = {alu_result, mem_addr, store_wdata, store_wstrb, id_to_ex1_bus_r};
+
+assign ex1_allowin = !ex1_valid && ex2_empty;
+
+always @(posedge clk) begin
+    if (reset || flush || ertn_flush || ibar_flush) begin
+        ex1_valid <= 1'b0;
+    end
+    else if (ex1_valid && ex2_allowin) begin
+        ex1_valid <= 1'b0;
+    end
+    else if (ex1_allowin) begin
+        ex1_valid <= id_to_ex1_valid;
+    end
+
+    if (id_to_ex1_valid && ex1_allowin && !flush && !ertn_flush && !ibar_flush) begin
+        id_to_ex1_bus_r <= id_to_ex1_bus;
+    end
+end
+
+assign ex1_to_ds_dest    = dest & {5{ex1_valid}} & {5{gr_we}};
+assign ex1_to_ds_result_ready = ex1_valid && gr_we &&
+                                !res_from_mem &&
+                                !mem_we &&
+                                (csr_op == 2'b00) &&
+                                !ds_rdcntv &&
+                                !ds_rdcntid &&
+                                !alu_op[12] &&
+                                !alu_op[16] &&
+                                !alu_op[17] &&
+                                !alu_op[18] &&
+                                !ds_ex;
+assign ex1_to_ds_result  = alu_result;
+assign ex1_csr_we        = (csr_op == 2'b10 || csr_op == 2'b11) && ex1_valid;
+assign ex1_csr_num       = csr_num;
+assign ex1_is_ertn       = inst_ertn && ex1_valid;
+
+endmodule
+
+module ex2_stage(
     input                          clk           ,
     input                          reset         ,
     //allowin
     input                          ms_allowin    ,
     input                          older_pipe_empty,
-    output                         es_allowin    ,
-    //from ds
-    input                          ds_to_es_valid,
-    input  [`DS_TO_ES_BUS_WD -1:0] ds_to_es_bus  ,
+    output                         ex2_allowin   ,
+    output                         ex2_empty     ,
+    //from ex1
+    input                          ex1_to_ex2_valid,
+    input  [`EX1_TO_EX2_BUS_WD -1:0] ex1_to_ex2_bus,
     //to ms
-    output                         es_to_ms_valid,
-    output [`ES_TO_MS_BUS_WD -1:0] es_to_ms_bus  ,
+    output                         ex2_to_mem_valid,
+    output [`EX2_TO_MEM_BUS_WD -1:0] ex2_to_mem_bus,
     // data sram interface
     output        data_sram_req    ,
     output        data_sram_wr     ,
@@ -41,7 +201,7 @@ module exe_stage(
     output        idle_wait,
     // forward to id
     output [4:0] es_to_ds_dest,
-    output es_to_ds_load_op,
+    output es_to_ds_result_ready,
     output [31:0] es_to_ds_result,
     // exception interface
     output        flush,
@@ -73,7 +233,7 @@ module exe_stage(
 reg         es_valid      ;
 wire        es_ready_go   ;
 
-reg  [`DS_TO_ES_BUS_WD -1:0] ds_to_es_bus_r;
+reg  [`EX1_TO_EX2_BUS_WD -1:0] ex1_to_ex2_bus_r;
 
 // ============================================================
 // Unpack ds_to_es_bus
@@ -81,6 +241,7 @@ reg  [`DS_TO_ES_BUS_WD -1:0] ds_to_es_bus_r;
 wire        ds_ex;
 wire [ 5:0] ds_ecode;
 wire [ 8:0] ds_esubcode;
+wire [31:0] es_inst;
 wire        inst_ll_w;
 wire        inst_sc_w;
 wire        inst_dbar;
@@ -113,10 +274,19 @@ wire [ 1:0] csr_op;
 wire [13:0] csr_num;
 wire        inst_syscall;
 wire        inst_ertn;
+wire [31:0] ex1_alu_result;
+wire [31:0] ex1_mem_addr;
+wire [31:0] ex1_store_wdata;
+wire [ 3:0] ex1_store_wstrb;
 
-assign {ds_ex,              // 1  (198)
+assign {ex1_alu_result,
+        ex1_mem_addr,
+        ex1_store_wdata,
+        ex1_store_wstrb,
+        ds_ex,              // 1  (198)
         ds_ecode,           // 6  (197:192)
         ds_esubcode,        // 9  (191:183)
+        es_inst,
         inst_ll_w,
         inst_sc_w,
         inst_dbar,
@@ -149,7 +319,7 @@ assign {ds_ex,              // 1  (198)
         csr_num,            // 14 (15:2)
         inst_syscall,       // 1  (1)
         inst_ertn           // 1  (0)
-       } = ds_to_es_bus_r;
+       } = ex1_to_ex2_bus_r;
 
 wire [31:0] alu_src1   ;
 wire [31:0] alu_src2   ;
@@ -171,7 +341,7 @@ wire [31:0] div_result ;
 // ============================================================
 assign alu_src1 = src1_is_pc  ? es_pc  : rj_value;
 assign alu_src2 = src2_is_imm ? imm : rkd_value;
-assign mem_addr = rj_value + imm;
+assign mem_addr = ex1_mem_addr;
 assign div_op     = !ds_ex && (alu_op[12] || alu_op[16] || alu_op[17] || alu_op[18]);
 assign div_signed = alu_op[12] || alu_op[16];
 assign div_is_mod = alu_op[16] || alu_op[18];
@@ -179,12 +349,7 @@ assign div_start  = es_valid && div_op && !div_busy && !div_done;
 assign div_cancel = flush || ertn_flush || (es_valid && div_op && div_done && ms_allowin);
 assign div_result = div_is_mod ? div_remainder : div_quotient;
 
-alu u_alu(
-    .alu_op     (alu_op    ),
-    .alu_src1   (alu_src1  ),
-    .alu_src2   (alu_src2  ),
-    .alu_result (alu_result)
-    );
+assign alu_result = ex1_alu_result;
 
 iter_divider u_iter_divider(
     .clk        (clk          ),
@@ -676,11 +841,9 @@ assign data_sram_req    = es_valid && es_mem_access && ms_allowin;
 assign data_sram_wr     = actual_mem_we && mem_access_ok;
 assign data_sram_size   = mem_size;
 assign data_sram_wstrb  = actual_mem_we && mem_access_ok ?
-                            ((mem_size == 2'b00) ? st_b_we :
-                             (mem_size == 2'b01) ? st_h_we : st_w_we) : 4'h0;
+                            ex1_store_wstrb : 4'h0;
 assign data_sram_addr   = data_paddr;
-assign data_sram_wdata  = (mem_size == 2'b00) ? st_b_wdata :
-                          (mem_size == 2'b01) ? st_h_wdata : st_w_wdata;
+assign data_sram_wdata  = ex1_store_wdata;
 assign data_sram_uncached = (data_mat == 2'b00);
 
 // ============================================================
@@ -708,8 +871,9 @@ wire es_operation_ready = div_op ? div_done :
                           inst_idle ? ex_pending :
                           (!es_mem_access || data_sram_addr_ok);
 assign es_ready_go    = es_operation_ready && privileged_state_ready;
-assign es_allowin     = !es_valid || es_ready_go && ms_allowin;
-assign es_to_ms_valid = es_valid && es_ready_go;
+assign ex2_allowin    = !es_valid || es_ready_go && ms_allowin;
+assign ex2_empty      = !es_valid;
+assign ex2_to_mem_valid = es_valid && es_ready_go;
 
 always @(posedge clk) begin
     if (reset) begin
@@ -718,19 +882,19 @@ always @(posedge clk) begin
     else if (flush || ertn_flush || ibar_flush) begin
         es_valid <= 1'b0;
     end
-    else if (es_allowin) begin
-        es_valid <= ds_to_es_valid;
+    else if (ex2_allowin) begin
+        es_valid <= ex1_to_ex2_valid;
     end
 
-    if (ds_to_es_valid && es_allowin && !flush && !ertn_flush && !ibar_flush) begin
-        ds_to_es_bus_r <= ds_to_es_bus;
+    if (ex1_to_ex2_valid && ex2_allowin && !flush && !ertn_flush && !ibar_flush) begin
+        ex1_to_ex2_bus_r <= ex1_to_ex2_bus;
     end
 end
 
 // ============================================================
 // Bus output
 // ============================================================
-assign es_to_ms_bus = {inst_ll_w && !ex_pending && !ertn_pending,
+assign ex2_to_mem_bus = {inst_ll_w && !ex_pending && !ertn_pending,
                        inst_sc_w && !ex_pending && !ertn_pending,
                        sc_success,
                        data_access_cached,
@@ -749,7 +913,12 @@ assign es_to_ms_bus = {inst_ll_w && !ex_pending && !ertn_pending,
 // Forward to ID
 // ============================================================
 assign es_to_ds_dest = dest & {5{es_valid}} & {5{gr_we}};
-assign es_to_ds_load_op = es_valid && gr_we;
-assign es_to_ds_result = 32'b0;
+assign es_to_ds_result_ready = es_valid && gr_we &&
+                               es_operation_ready &&
+                               !res_from_mem &&
+                               !inst_sc_w &&
+                               !ex_pending &&
+                               !ertn_pending;
+assign es_to_ds_result = exe_result;
 
 endmodule
