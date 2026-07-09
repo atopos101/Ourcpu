@@ -34,43 +34,48 @@ reg  [31:0] fetch_pc;
 reg         if1_req;
 reg  [31:0] req_pc;
 reg         req_cancel;
-reg         redirect_pending;
-reg  [31:0] redirect_pending_pc;
+
+reg         if1b_valid;
+reg  [31:0] if1b_pc;
+reg         if1b_cancel;
+reg  [31:0] if1b_paddr;
+reg         if1b_ex;
+reg  [ 5:0] if1b_ecode;
+reg  [ 8:0] if1b_esubcode;
 
 wire        fetch_adef;
 wire        fetch_ex;
 wire [ 5:0] fetch_ecode;
 wire [ 8:0] fetch_esubcode;
-wire        inst_addr_hs;
+wire        if1a_hs;
+wire        if1b_hs;
 wire        new_req_ready;
-wire        redirect_blocked;
-
-assign redirect_blocked = redirect_valid && if1_req && !inst_addr_hs;
 
 assign fetch_adef     = if1_req && (req_pc[1:0] != 2'b00);
 assign fetch_ex       = fetch_adef || (if1_req && inst_trans_ex);
 assign fetch_ecode    = fetch_adef ? `ECODE_ADEF : inst_trans_ecode;
 assign fetch_esubcode = fetch_adef ? 9'h000      : inst_trans_esubcode;
 
-assign inst_addr_hs     = if2_allowin &&
-                          (fetch_ex || (inst_sram_req && inst_sram_addr_ok));
-assign if1_to_if2_valid = inst_addr_hs;
-assign if1_to_if2_bus   = {req_pc,
-                           req_cancel || redirect_valid,
-                           fetch_ex,
-                           fetch_ecode,
-                           fetch_esubcode};
+assign if1a_hs          = if1_req && !if1b_valid && !idle_wait;
+assign if1b_hs          = if1b_valid && if2_allowin &&
+                          (if1b_ex || (inst_sram_req && inst_sram_addr_ok));
+assign if1_to_if2_valid = if1b_hs;
+assign if1_to_if2_bus   = {if1b_pc,
+                           if1b_cancel || redirect_valid,
+                           if1b_ex,
+                           if1b_ecode,
+                           if1b_esubcode};
 
 assign inst_vaddr = if1_req ? req_pc : fetch_pc;
 
-assign inst_sram_req   = if1_req && if2_allowin && !fetch_ex && !idle_wait;
+assign inst_sram_req   = if1b_valid && if2_allowin && !if1b_ex && !idle_wait;
 assign inst_sram_wr    = 1'b0;
 assign inst_sram_size  = 2'b10;
 assign inst_sram_wstrb = 4'b0000;
-assign inst_sram_addr  = inst_paddr;
+assign inst_sram_addr  = if1b_paddr;
 assign inst_sram_wdata = 32'b0;
 
-assign new_req_ready = !if1_req && if2_allowin && !idle_wait;
+assign new_req_ready = !if1_req && !idle_wait;
 
 always @(posedge clk) begin
     if (reset) begin
@@ -79,10 +84,7 @@ always @(posedge clk) begin
     else if (redirect_valid) begin
         fetch_pc <= redirect_pc;
     end
-    else if (inst_addr_hs && req_cancel && redirect_pending) begin
-        fetch_pc <= redirect_pending_pc;
-    end
-    else if (inst_addr_hs && !req_cancel) begin
+    else if (if1a_hs && !req_cancel) begin
         fetch_pc <= req_pc + 3'h4;
     end
 end
@@ -92,38 +94,49 @@ always @(posedge clk) begin
         if1_req            <= 1'b0;
         req_pc             <= 32'b0;
         req_cancel         <= 1'b0;
-        redirect_pending   <= 1'b0;
-        redirect_pending_pc<= 32'b0;
     end
     else begin
-        if (inst_addr_hs) begin
+        if (if1a_hs) begin
             if1_req    <= 1'b0;
             req_cancel <= 1'b0;
         end
 
-        if (redirect_blocked) begin
-            req_cancel          <= 1'b1;
-            redirect_pending    <= 1'b1;
-            redirect_pending_pc <= redirect_pc;
-        end
-        else if (redirect_valid) begin
-            redirect_pending <= 1'b0;
-            if (new_req_ready || inst_addr_hs) begin
-                if1_req    <= 1'b1;
-                req_pc     <= redirect_pc;
-                req_cancel <= 1'b0;
-            end
-        end
-        else if (inst_addr_hs && req_cancel && redirect_pending) begin
-            if1_req          <= 1'b1;
-            req_pc           <= redirect_pending_pc;
-            req_cancel       <= 1'b0;
-            redirect_pending <= 1'b0;
+        if (redirect_valid) begin
+            if1_req    <= 1'b1;
+            req_pc     <= redirect_pc;
+            req_cancel <= 1'b0;
         end
         else if (new_req_ready) begin
             if1_req    <= 1'b1;
             req_pc     <= fetch_pc;
             req_cancel <= 1'b0;
+        end
+    end
+end
+
+always @(posedge clk) begin
+    if (reset) begin
+        if1b_valid    <= 1'b0;
+        if1b_pc       <= 32'b0;
+        if1b_cancel   <= 1'b0;
+        if1b_paddr    <= 32'b0;
+        if1b_ex       <= 1'b0;
+        if1b_ecode    <= 6'b0;
+        if1b_esubcode <= 9'b0;
+    end
+    else begin
+        if (if1b_hs || redirect_valid) begin
+            if1b_valid <= 1'b0;
+        end
+
+        if (if1a_hs && !redirect_valid) begin
+            if1b_valid    <= 1'b1;
+            if1b_pc       <= req_pc;
+            if1b_cancel   <= req_cancel;
+            if1b_paddr    <= inst_paddr;
+            if1b_ex       <= fetch_ex;
+            if1b_ecode    <= fetch_ecode;
+            if1b_esubcode <= fetch_esubcode;
         end
     end
 end
