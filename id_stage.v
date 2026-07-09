@@ -21,23 +21,29 @@ module id_stage(
     // hazard detect
     input [4:0] ex1_to_ds_dest,
     input [4:0] ex2_to_ds_dest,
+    input [4:0] ex3_to_ds_dest,
     input [4:0] ms_to_ds_dest,
     input [4:0] ws_to_ds_dest,
     input       ex1_to_ds_result_ready,
     input       ex2_to_ds_result_ready,
+    input       ex3_to_ds_result_ready,
     input       ms_to_ds_result_ready,
     input       ws_to_ds_result_ready,
     input [31:0] ex1_to_ds_result,
     input [31:0] ex2_to_ds_result,
+    input [31:0] ex3_to_ds_result,
     input [31:0] ms_to_ds_result,
     input [31:0] ws_to_ds_result,
-    // csr hazard tracking from EX1/EX2
+    // csr hazard tracking from EX1/EX2/EX3
     input        ex1_csr_we,
     input [13:0] ex1_csr_num,
     input        ex1_is_ertn,
     input        ex2_csr_we,
     input [13:0] ex2_csr_num,
     input        ex2_is_ertn,
+    input        ex3_csr_we,
+    input [13:0] ex3_csr_num,
+    input        ex3_is_ertn,
     // ertn flush
     input        ertn_flush
 );
@@ -498,29 +504,54 @@ regfile u_regfile(
 
 wire rj_hit_ex1 = ~src_no_rj && (rj != 5'b00000) && (rj == ex1_to_ds_dest);
 wire rj_hit_ex2 = ~src_no_rj && (rj != 5'b00000) && (rj == ex2_to_ds_dest);
+wire rj_hit_ex3 = ~src_no_rj && (rj != 5'b00000) && (rj == ex3_to_ds_dest);
 wire rj_hit_ms  = ~src_no_rj && (rj != 5'b00000) && (rj == ms_to_ds_dest);
 wire rj_hit_ws  = ~src_no_rj && (rj != 5'b00000) && (rj == ws_to_ds_dest);
 wire rk_hit_ex1 = ~src_no_rk && (rk != 5'b00000) && (rk == ex1_to_ds_dest);
 wire rk_hit_ex2 = ~src_no_rk && (rk != 5'b00000) && (rk == ex2_to_ds_dest);
+wire rk_hit_ex3 = ~src_no_rk && (rk != 5'b00000) && (rk == ex3_to_ds_dest);
 wire rk_hit_ms  = ~src_no_rk && (rk != 5'b00000) && (rk == ms_to_ds_dest);
 wire rk_hit_ws  = ~src_no_rk && (rk != 5'b00000) && (rk == ws_to_ds_dest);
 wire rd_hit_ex1 = ~src_no_rd && (rd != 5'b00000) && (rd == ex1_to_ds_dest);
 wire rd_hit_ex2 = ~src_no_rd && (rd != 5'b00000) && (rd == ex2_to_ds_dest);
+wire rd_hit_ex3 = ~src_no_rd && (rd != 5'b00000) && (rd == ex3_to_ds_dest);
 wire rd_hit_ms  = ~src_no_rd && (rd != 5'b00000) && (rd == ms_to_ds_dest);
 wire rd_hit_ws  = ~src_no_rd && (rd != 5'b00000) && (rd == ws_to_ds_dest);
 
-wire [31:0] rj_forward_result = rj_hit_ex1 ? ex1_to_ds_result :
-                                rj_hit_ex2 ? ex2_to_ds_result :
-                                rj_hit_ms  ? ms_to_ds_result  :
-                                             ws_to_ds_result;
-wire [31:0] rk_forward_result = rk_hit_ex1 ? ex1_to_ds_result :
-                                rk_hit_ex2 ? ex2_to_ds_result :
-                                rk_hit_ms  ? ms_to_ds_result  :
-                                             ws_to_ds_result;
-wire [31:0] rd_forward_result = rd_hit_ex1 ? ex1_to_ds_result :
-                                rd_hit_ex2 ? ex2_to_ds_result :
-                                rd_hit_ms  ? ms_to_ds_result  :
-                                             ws_to_ds_result;
+wire rj_fwd_ex1 = rj_hit_ex1 && ex1_to_ds_result_ready;
+wire rj_fwd_ex2 = rj_hit_ex2 && ex2_to_ds_result_ready;
+wire rj_fwd_ex3 = rj_hit_ex3 && ex3_to_ds_result_ready;
+wire rj_fwd_ms  = rj_hit_ms  && ms_to_ds_result_ready;
+wire rj_fwd_ws  = rj_hit_ws  && ws_to_ds_result_ready;
+wire rk_fwd_ex1 = rk_hit_ex1 && ex1_to_ds_result_ready;
+wire rk_fwd_ex2 = rk_hit_ex2 && ex2_to_ds_result_ready;
+wire rk_fwd_ex3 = rk_hit_ex3 && ex3_to_ds_result_ready;
+wire rk_fwd_ms  = rk_hit_ms  && ms_to_ds_result_ready;
+wire rk_fwd_ws  = rk_hit_ws  && ws_to_ds_result_ready;
+wire rd_fwd_ex1 = rd_hit_ex1 && ex1_to_ds_result_ready;
+wire rd_fwd_ex2 = rd_hit_ex2 && ex2_to_ds_result_ready;
+wire rd_fwd_ex3 = rd_hit_ex3 && ex3_to_ds_result_ready;
+wire rd_fwd_ms  = rd_hit_ms  && ms_to_ds_result_ready;
+wire rd_fwd_ws  = rd_hit_ws  && ws_to_ds_result_ready;
+
+wire [31:0] rj_forward_result = rj_fwd_ex1 ? ex1_to_ds_result :
+                                rj_fwd_ex2 ? ex2_to_ds_result :
+                                rj_fwd_ex3 ? ex3_to_ds_result :
+                                rj_fwd_ms  ? ms_to_ds_result  :
+                                rj_fwd_ws  ? ws_to_ds_result  :
+                                             rf_rdata1;
+wire [31:0] rk_forward_result = rk_fwd_ex1 ? ex1_to_ds_result :
+                                rk_fwd_ex2 ? ex2_to_ds_result :
+                                rk_fwd_ex3 ? ex3_to_ds_result :
+                                rk_fwd_ms  ? ms_to_ds_result  :
+                                rk_fwd_ws  ? ws_to_ds_result  :
+                                             rf_rdata2;
+wire [31:0] rd_forward_result = rd_fwd_ex1 ? ex1_to_ds_result :
+                                rd_fwd_ex2 ? ex2_to_ds_result :
+                                rd_fwd_ex3 ? ex3_to_ds_result :
+                                rd_fwd_ms  ? ms_to_ds_result  :
+                                rd_fwd_ws  ? ws_to_ds_result  :
+                                             rf_rdata2;
 
 assign rj_value  = rj_wait ? rj_forward_result : rf_rdata1;
 assign rkd_value = rk_wait ? rk_forward_result :
@@ -567,23 +598,26 @@ assign src_no_rk = inst_slli_w | inst_srli_w | inst_srai_w | inst_addi_w | load_
 assign src_no_rd = inst_dbar | inst_ibar | inst_idle |
                    (~store_op & ~branch_op & ~inst_csrwr & ~inst_csrxchg);
 
-assign rj_wait = rj_hit_ex1 || rj_hit_ex2 || rj_hit_ms || rj_hit_ws;
-assign rk_wait = rk_hit_ex1 || rk_hit_ex2 || rk_hit_ms || rk_hit_ws;
-assign rd_wait = rd_hit_ex1 || rd_hit_ex2 || rd_hit_ms || rd_hit_ws;
+assign rj_wait = rj_hit_ex1 || rj_hit_ex2 || rj_hit_ex3 || rj_hit_ms || rj_hit_ws;
+assign rk_wait = rk_hit_ex1 || rk_hit_ex2 || rk_hit_ex3 || rk_hit_ms || rk_hit_ws;
+assign rd_wait = rd_hit_ex1 || rd_hit_ex2 || rd_hit_ex3 || rd_hit_ms || rd_hit_ws;
 
 assign br_target = (branch_op || inst_bl || inst_b) ? (ds_pc + br_offs) :
                                                    /*inst_jirl*/ (rj_value + jirl_offs);
 
 wire rj_not_ready = rj_hit_ex1 ? !ex1_to_ds_result_ready :
                     rj_hit_ex2 ? !ex2_to_ds_result_ready :
+                    rj_hit_ex3 ? !ex3_to_ds_result_ready :
                     rj_hit_ms  ? !ms_to_ds_result_ready  :
                     rj_hit_ws  ? !ws_to_ds_result_ready  : 1'b0;
 wire rk_not_ready = rk_hit_ex1 ? !ex1_to_ds_result_ready :
                     rk_hit_ex2 ? !ex2_to_ds_result_ready :
+                    rk_hit_ex3 ? !ex3_to_ds_result_ready :
                     rk_hit_ms  ? !ms_to_ds_result_ready  :
                     rk_hit_ws  ? !ws_to_ds_result_ready  : 1'b0;
 wire rd_not_ready = rd_hit_ex1 ? !ex1_to_ds_result_ready :
                     rd_hit_ex2 ? !ex2_to_ds_result_ready :
+                    rd_hit_ex3 ? !ex3_to_ds_result_ready :
                     rd_hit_ms  ? !ms_to_ds_result_ready  :
                     rd_hit_ws  ? !ws_to_ds_result_ready  : 1'b0;
 
@@ -617,6 +651,14 @@ assign ex2_writes_int_csr = ex2_csr_we && (
     ex2_csr_num == CSR_TICLR_NO
 );
 
+wire ex3_writes_int_csr;
+assign ex3_writes_int_csr = ex3_csr_we && (
+    ex3_csr_num == CSR_CRMD_NO  ||
+    ex3_csr_num == CSR_ECFG_NO  ||
+    ex3_csr_num == CSR_TCFG_NO  ||
+    ex3_csr_num == CSR_TICLR_NO
+);
+
 wire ex1_writes_ertn_csr;
 assign ex1_writes_ertn_csr = ex1_csr_we && (
     ex1_csr_num == CSR_ERA_NO  ||
@@ -629,14 +671,20 @@ assign ex2_writes_ertn_csr = ex2_csr_we && (
     ex2_csr_num == CSR_PRMD_NO
 );
 
+wire ex3_writes_ertn_csr;
+assign ex3_writes_ertn_csr = ex3_csr_we && (
+    ex3_csr_num == CSR_ERA_NO  ||
+    ex3_csr_num == CSR_PRMD_NO
+);
+
 wire id_needs_int_csr  = 1'b1;
 wire id_needs_ertn_csr = inst_ertn;
 
 wire csr_stall;
 assign csr_stall = ds_valid && (
-    (id_needs_int_csr  && (ex1_writes_int_csr || ex2_writes_int_csr))   ||
-    (id_needs_ertn_csr && (ex1_writes_ertn_csr || ex2_writes_ertn_csr)) ||
-    (id_needs_int_csr  && (ex1_is_ertn || ex2_is_ertn))
+    (id_needs_int_csr  && (ex1_writes_int_csr || ex2_writes_int_csr || ex3_writes_int_csr))   ||
+    (id_needs_ertn_csr && (ex1_writes_ertn_csr || ex2_writes_ertn_csr || ex3_writes_ertn_csr)) ||
+    (id_needs_int_csr  && (ex1_is_ertn || ex2_is_ertn || ex3_is_ertn))
 );
 
 // ============================================================

@@ -9,7 +9,9 @@
 `define IF2_TO_ID_BUS_WD  80    // {inst[31:0], pc[31:0], ex, ecode[5:0], esubcode[8:0]}
 `define ID_TO_EX1_BUS_WD  250   // DS_TO_ES payload + instruction for aligned Difftest sideband
 `define EX1_TO_EX2_BUS_WD 350   // {alu_result, mem_addr, store_wdata, store_wstrb, ID_TO_EX1 payload}
-`define EX2_TO_MEM_BUS_WD 107   // transitional alias of ES_TO_MS payload
+`define EX2_TO_EX3_BUS_WD 658   // {EX2 sideband, EX1_TO_EX2 payload}
+`define EX3_TO_MEM_BUS_WD 107   // EX3_TO_MEM payload, same layout as ES_TO_MS
+`define EX2_TO_MEM_BUS_WD 107   // legacy payload width
 
 `define FS_TO_DS_BUS_WD 80    // {inst[31:0], pc[31:0], fs_ex, fs_ecode, fs_esubcode}
 `define DS_TO_ES_BUS_WD 250   // previous fields + LL.W/SC.W + DBAR/IBAR + IDLE + instruction
@@ -35,6 +37,7 @@
 `define ECODE_SYSCALL  6'h0b
 `define ECODE_BRK      6'h0c
 `define ECODE_INE      6'h0d
+`define ECODE_IPE      6'h0e
 `define ECODE_TLBR     6'h3f
 
 // Interrupt bit positions in ESTAT.IS / ECFG.LIE

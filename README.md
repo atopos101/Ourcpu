@@ -1,596 +1,265 @@
-# Ourcpu：LoongArch 七级流水 AXI CPU
+# OurCPU: LoongArch 八级流水 AXI CPU
 
-本仓库是一套使用 Verilog 实现的 32 位 LoongArch 七级流水 CPU。设计包含
-TLB、虚实地址转换、异常与中断、DMW 直接映射窗口、独立的指令/数据
-Cache、LL/SC、Cache 维护、栅障与 `IDLE` 指令，对外提供 32 位 AXI 主接口。
+本仓库是一套使用 Verilog 实现的 32 位 LoongArch 顺序单发射 CPU。当前 RTL
+已经拆分为八级流水，并集成了虚实地址转换、CSR、异常与中断、TLB、独立
+ICache/DCache、LL/SC、Cache 维护、`DBAR`/`IBAR`、`IDLE` 以及 32 位 AXI
+主接口。
 
-> 当前仓库只包含 CPU RTL，没有 testbench、SoC 外设、约束文件或一键构建脚本。
-> 集成时请将根目录下全部 `.v` 文件加入工程，并以 `core_top` 作为顶层模块。
+> 当前仓库主要包含 CPU RTL。集成到工程时，请将根目录下全部 `.v` 文件加入
+> 工程，并以 `core_top` 作为顶层模块。`SIMU` 宏打开时会实例化 Difftest
+> 相关模块；综合或普通仿真环境如果没有这些模块，请不要定义 `SIMU`。
 
 ## 总体架构
 
-CPU 内核当前采用顺序单发射七级流水：
+CPU 内核采用八级流水：
 
 ```text
-IF1 -> IF2 -> ID -> EX1 -> EX2 -> MEM -> WB
-请求   响应   译码   前执行  后执行  访存   写回
+IF1 -> IF2 -> ID -> EX1 -> EX2 -> EX3 -> MEM -> WB
+取指   回包   译码   前执行  后执行  提交/访存 访存   写回
 ```
 
-流水级之间使用 `valid/allowin` 握手机制：
+各级之间使用 `valid/allowin` 握手。重定向来源统一汇总到 IF，优先级为：
 
-```verilog
-allowin       = !valid || (ready_go && next_allowin);
-to_next_valid = valid && ready_go;
+```text
+ERTN > exception > IBAR > branch
 ```
 
-整体结构如下：
+整体数据通路如下：
 
 ```mermaid
 flowchart LR
-    subgraph CPU["core_top"]
+    subgraph Top["core_top"]
         subgraph Core["mycpu_core"]
-            IF1["IF1\nPC/取指请求/重定向"]
-            IF2["IF2\n响应过滤/指令打包"]
+            IF1["IF1\nPC/取指请求/重定向取消"]
+            IF2["IF2\n取指响应/旧响应过滤"]
             ID["ID\n译码/寄存器/分支/冒险"]
-            EX1["EX1\nALU/虚地址/store 数据"]
-            EX2["EX2\nCSR/TLB/MMU/异常/访存请求"]
-            MEM["MEM\nLoad 数据选择"]
-            WB["WB\n写回/debug trace"]
-            TLB["TLB\n16 项全相联"]
-            CSR["CSR\n异常/中断/TLB/DMW"]
+            EX1["EX1\nALU 早期结果/访存虚地址/store 数据"]
+            EX2["EX2\nCSR/TLB/MMU/乘除法/异常预判"]
+            EX3["EX3\n特权提交/访存请求/CACOP/DBAR/IBAR/IDLE"]
+            MEM["MEM\nload 数据选择/LLSC 退休事件"]
+            WB["WB\n寄存器写回/debug trace"]
+            CSR["CSR\n异常/中断/计时器/TLB/DMW"]
+            TLB["TLB\n32 项全相联"]
 
-            IF1 --> IF2 --> ID --> EX1 --> EX2 --> MEM --> WB
-            EX2 <--> TLB
+            IF1 --> IF2 --> ID --> EX1 --> EX2 --> EX3 --> MEM --> WB
             EX2 <--> CSR
+            EX2 <--> TLB
             WB --> ID
             ID --> IF1
         end
 
-        ICache["ICache\n2 路组相联/整行回填"]
-        DCache["DCache\n写回/脏行驱逐"]
-        Barrier["barrier_ctrl\nDBAR/IBAR"]
-        Bridge["sram_axi_bridge_2x1"]
+        ICache["ICache\n2 路/256 组/16B 行"]
+        DCache["DCache\n2 路/256 组/16B 行/写回"]
+        Barrier["barrier_ctrl\nDBAR/IBAR 维护扫描"]
+        Bridge["sram_axi_bridge_2x1\nSRAM-like 到 AXI"]
     end
 
-    IF1 -- "inst_sram req" --> ICache
-    ICache -- "AXI burst refill" --> Bridge
-    EX2 -- "data_sram req" --> DCache
-    EX2 -- "barrier req" --> Barrier
-    Barrier -- "clean/invalidate" --> DCache
-    Barrier -- "invalidate" --> ICache
-    DCache -- "AXI burst" --> Bridge
-    Bridge -- "AXI" --> SOC["外部 AXI 总线"]
-    WB -- "debug_wb_*" --> TRACE["trace 比对"]
+    IF1 -- "inst_sram" --> ICache
+    EX3 -- "data_sram / uncached" --> DCache
+    EX3 -- "barrier" --> Barrier
+    Barrier --> DCache
+    Barrier --> ICache
+    ICache -- "burst refill" --> Bridge
+    DCache -- "burst refill/writeback" --> Bridge
+    Bridge -- "AXI4-like 32-bit" --> AXI["外部 AXI 总线"]
 ```
 
-## 文件职责
+## 流水级职责
 
-### `core_top.v`
+- `IF1`: 维护 PC，处理分支、异常、`ertn`、`ibar` 等重定向，发起取指请求，并为已发出的旧请求打取消标记。
+- `IF2`: 接收取指返回，保存请求 PC 和指令，过滤重定向前遗留的旧响应，向 ID 传递取指异常。
+- `ID`: 完成指令译码、寄存器堆读取、分支判断、立即数生成、RAW/CSR/系统指令冒险检测和前递选择。
+- `EX1`: 生成组合 ALU 早期结果，计算访存虚地址，准备 store 数据和写掩码，向 ID 暴露可前递结果。
+- `EX2`: 执行 CSR 读写准备、TLB 查询/读写/无效化、DMW/TLB 地址转换、乘法流水和迭代除法等待，并形成异常候选信息。
+- `EX3`: 当前设计的特权状态提交点。异常、`ertn`、`ibar`、CSR/TLB 副作用、访存请求、`CACOP`、`DBAR`/`IBAR` 和 `IDLE` 的最终发起都在该级仲裁。
+- `MEM`: 等待 load 返回，根据访问宽度做符号/零扩展，生成 LL/SC 退休事件，并把最终结果送入 WB。
+- `WB`: 写回通用寄存器，输出 `debug0_wb_*` trace，并向 ID 提供 WB 级前递结果。
 
-仓库顶层文件，包含 `core_top`、`mycpu_core` 和
-`sram_axi_bridge_2x1` 三个模块，连接七级流水、Cache、AXI 桥接、
-debug 接口和外部中断输入。
+## 文件说明
 
-关键功能：
+| 文件 | 说明 |
+| --- | --- |
+| `core_top.v` | 顶层、`mycpu_core`、SRAM-like 到 AXI 桥、Cache/Barrier/LLSC/Difftest 连接。 |
+| `if_stage.v` | `if1_stage`、`if2_stage` 以及兼容旧接口的 `if_stage` 包装。 |
+| `id_stage.v` | 指令译码、寄存器堆读、分支、前递和冒险控制。 |
+| `exe_stage.v` | `ex1_stage`、`ex2_stage`、`ex3_stage`，包含执行、地址转换、CSR/TLB 和提交逻辑。 |
+| `mem_stage.v` | load 数据处理、LL/SC 退休事件、MEM 到 WB 总线。 |
+| `wb_stage.v` | 通用寄存器写回和 trace 输出。 |
+| `csr_regfile.v` | CSR、异常入口、`ertn`、中断、计时器、DMW 和 TLB 相关 CSR。 |
+| `tlb.v` | 参数化全相联 TLB，core 中实例化为 32 项。 |
+| `icache.v` | 2 路 256 组指令 Cache，16B 行，支持整行回填和维护操作。 |
+| `dcache.v` | 2 路 256 组数据 Cache，16B 行，写回策略，支持 clean/invalidate。 |
+| `barrier_ctrl.v` | `DBAR`/`IBAR` 控制器，`IBAR` 会扫描 DCache 后再扫描 ICache。 |
+| `llsc_unit.v` | LL/SC reservation 状态维护。当前 reservation 以 16B 物理 cache line 为粒度。 |
+| `alu.v` | ALU、流水乘法器和迭代除法器。 |
+| `regfile.v` | 32 个 32 位通用寄存器。 |
+| `decoder_*.v` | 译码器基础模块。 |
+| `mycpu.vh` | 流水总线宽度、重定向原因、异常码和中断位宏定义。 |
 
-- 对外提供 AXI 主接口。
-- 内部保留类 SRAM 风格的取指和访存请求。
-- 在取指通路中实例化 ICache，在访存通路中实例化 DCache。
-- 使用 `sram_axi_bridge_2x1` 仲裁 ICache、DCache 和非缓存访存，并转换为
-  AXI 读写事务。
-- 对外提供 `debug0_wb_*` 提交跟踪信号，以及寄存器调试读取接口。
+## 支持的主要功能
 
-### `if_stage.v`
+### 指令
 
-取指阶段文件，内部包含 `if1_stage`、`if2_stage`，并保留一个兼容旧连接风格的
-`if_stage` 包装模块。
+已译码并实现的指令包括：
 
-关键功能：
-
-- `if1_stage` 维护 PC，处理分支、异常、`ertn`、`ibar` 的统一重定向。
-- `if1_stage` 发起取指请求，并把请求 PC、取消标记、取指异常打包送入 IF2。
-- `if2_stage` 等待取指响应，保存返回指令和对应 PC。
-- `if2_stage` 使用 `resp_cancel` 过滤重定向前发出的旧响应，避免旧指令进入 ID。
-- 检测取指地址 ADEF。
-- 接收 EX2 阶段给出的取指物理地址和取指 TLB 异常。
-
-### `icache.v`
-
-指令 Cache 模块。
-
-关键功能：
-
-- 2 路组相联，256 组，每行 16 Byte。
-- 每个 Cache 行包含 4 个 32 位 bank。
-- 使用 LRU 选择替换路。
-- 使用写回策略；替换或维护脏行时通过 4 拍 burst 写回。
-- 通过 `addr_ok/data_ok` 与 IF 阶段握手。
-- miss 时通过 `rd_req/rd_rdy` 发起整行读请求。
-- 使用 `ret_valid/ret_last` 接收 4 拍 burst 回填数据。
-- 文件内包含可综合的同步 RAM 模块 `ram_256x21` 和 `ram_256x32`。
-
-### `dcache.v`
-
-数据 Cache 模块。
-
-关键功能：
-
-- 写回策略，支持脏行驱逐。
-- 2 路组相联，256 组，每行 16 Byte。
-- 通过 4 拍 AXI burst 回填和写回整行数据。
-- 支持普通 Cache 操作与仅 clean 的维护操作。
-- 在替换或无效化行时输出通知，用于清除 LL/SC reservation。
-- 与 EX2 阶段的数据 SRAM 接口交互。
-
-### `barrier_ctrl.v`
-
-栅障控制器。`dbar` 等待数据侧事务排空；`ibar` 进一步遍历 512 个
-DCache 行槽执行 clean，再遍历 512 个 ICache 行槽执行 invalidate。
-
-### `llsc_unit.v`
-
-LL/SC reservation 管理单元。reservation 以 16 Byte 物理 Cache 行为粒度，
-并在 SC、相关 store、Cache 行无效化、`LLBCTL.WCLLB` 或未受 KLO 保护的
-`ertn` 等事件发生时清除。
-
-### `id_stage.v`
-
-译码阶段。
-
-关键功能：
-
-- 基础指令译码。
-- CSR 指令译码。
-- TLB 指令译码。
-- 通用寄存器读。
-- 分支判断。
-- RAW 冒险、load-use 冒险、CSR 冒险和系统指令相关阻塞。
-- 同时观察 EX1、EX2、MEM、WB 四级 producer，按 EX1 > EX2 > MEM > WB 优先级前递。
-- 使用 `producer_not_ready_stall` 统一处理 load、CSR、除法、SC 等结果未就绪场景。
-- 将 TLB 操作类型和 `invtlb` 操作码通过流水总线送入 EX1/EX2。
-
-### `exe_stage.v`
-
-执行阶段文件，内部拆分为 `ex1_stage` 和 `ex2_stage`。
-
-关键功能：
-
-- `ex1_stage` 执行 ALU 运算，计算访存虚地址，预生成 store 数据和写掩码。
-- `ex1_stage` 向 ID 暴露可前递的早期 ALU 结果，并对 load、CSR、除法等晚产生结果标记未就绪。
-- `ex2_stage` 控制迭代除法器，完成 CSR 读写、TLB 访问、DMW/TLB 地址转换。
-- `ex2_stage` 执行 `tlbsrch/tlbrd/tlbwr/tlbfill/invtlb`。
-- `ex2_stage` 产生取指和数据访问相关 TLB 异常、ALE、系统异常和中断。
-- `ex2_stage` 发起数据 SRAM/AXI 请求，并完成 CACOP、DBAR、IBAR、IDLE、LL/SC 判断。
-- CSR/TLB/异常/`ertn`/`ibar` 等副作用只在 EX2 提交点发生。
-
-### `mem_stage.v`
-
-访存后处理阶段。
-
-关键功能：
-
-- 等待 load 返回数据。
-- 根据 `mem_size` 选择 byte/halfword/word。
-- 对 `ld.b/ld.h` 做符号扩展。
-- 对 `ld.bu/ld.hu` 做零扩展。
-- 将 load、SC 返回值或 EX2 传来的执行结果送到 WB。
-- 产生 LL/SC 顺序退休事件，供 `llsc_unit.v` 更新 reservation。
-
-### `wb_stage.v`
-
-写回阶段。
-
-关键功能：
-
-- 写回通用寄存器。
-- 输出 debug trace。
-- 向 ID 提供 WB 级前递结果。
-- 作为通用寄存器架构写回和 debug trace 的唯一提交点。
-
-### `csr_regfile.v`
-
-CSR 寄存器堆。
-
-关键功能：
-
-- 基础异常 CSR。
-- 中断和定时器 CSR。
-- TLB 相关 CSR。
-- DMW CSR。
-- TLB 指令对 CSR 的副作用。
-- 异常入口选择。
-- TLB 异常时更新 `BADV` 和 `TLBEHI`。
-
-### `tlb.v`
-
-独立 TLB 模块。
-
-关键功能：
-
-- 16 项全相联 TLB。
-- 双查询端口。
-- 单读端口。
-- 单写端口。
-- 支持 `tlbwr`、`tlbfill`、`tlbrd`、`tlbsrch`、`invtlb`。
-- 支持 4KB 和 4MB 页。
-- 支持 ASID 和 G 全局位匹配。
-
-### `alu.v`
-
-算术逻辑单元。
-
-关键功能：
-
-- 普通 ALU 操作仍为组合逻辑。
-- 乘法相关操作保留组合结果选择。
-- 除法和取模改为 `iter_divider` 迭代实现，避免组合除法造成严重时序路径。
-
-### `mycpu.vh`
-
-全局宏定义。
-
-关键功能：
-
-- 流水总线宽度。
-- 七级流水边界宽度：`IF1_TO_IF2_BUS_WD`、`IF2_TO_ID_BUS_WD`、
-  `ID_TO_EX1_BUS_WD`、`EX1_TO_EX2_BUS_WD`、`EX2_TO_MEM_BUS_WD`。
-- 统一重定向原因：branch、IBAR、exception、ERTN。
-- 异常码。
-- 中断位编号。
-
-## 已支持指令
-
-### 基础整数指令
-
-支持常见 LoongArch 整数指令：
-
-- 算术逻辑：`add.w`、`sub.w`、`slt`、`sltu`、`nor`、`and`、`or`、`xor`
+- 整数运算：`add.w`、`sub.w`、`slt`、`sltu`、`nor`、`and`、`or`、`xor`
 - 立即数：`addi.w`、`slti`、`sltui`、`andi`、`ori`、`xori`、`lu12i.w`、`pcaddu12i`
 - 移位：`slli.w`、`srli.w`、`srai.w`、`sll.w`、`srl.w`、`sra.w`
 - 乘除法：`mul.w`、`mulh.w`、`mulh.wu`、`div.w`、`div.wu`、`mod.w`、`mod.wu`
-- 访存：`ld.b`、`ld.h`、`ld.w`、`ld.bu`、`ld.hu`、`st.b`、`st.h`、`st.w`
+- 访存：`ld.b`、`ld.h`、`ld.w`、`ld.bu`、`ld.hu`、`st.b`、`st.h`、`st.w`、`preld`
 - 原子访存：`ll.w`、`sc.w`
 - 分支跳转：`jirl`、`b`、`bl`、`beq`、`bne`、`blt`、`bge`、`bltu`、`bgeu`
+- CSR/系统：`csrrd`、`csrwr`、`csrxchg`、`ertn`、`syscall`、`break`、`rdcntvl.w`、`rdcntvh.w`、`rdcntid`
+- TLB：`tlbsrch`、`tlbrd`、`tlbwr`、`tlbfill`、`invtlb`
+- Cache/同步：`cacop`、`dbar`、`ibar`、`idle`
 
-### CSR 和系统指令
+### CSR
 
-支持以下 CSR/系统相关指令：
-
-- `csrrd`
-- `csrwr`
-- `csrxchg`
-- `ertn`
-- `syscall`
-- `break`
-- `rdcntvl.w`
-- `rdcntvh.w`
-- `rdcntid`
-
-### TLB 指令
-
-支持以下 TLB 指令：
-
-- `tlbsrch`
-- `tlbrd`
-- `tlbwr`
-- `tlbfill`
-- `invtlb`
-
-TLB 指令的状态修改都由 EX2 阶段在提交点统一控制。如果指令被异常、`ertn` 或 flush 冲刷，不会错误修改 TLB 或 CSR。
-
-### Cache 操作指令
-
-支持 `cacop` 指令的 op0、op1、op2 操作：
-
-- op0：对 ICache 操作（按索引）。
-- op1：对 DCache 操作（按索引）。
-- op2：带地址翻译的 Cache 操作，按需产生 TLBR、PIL、PPI 异常。
-
-### 栅障指令
-
-支持 `dbar hint` 和 `ibar hint`。当前不区分 hint 等级，所有 hint 都按
-`hint=0` 的最强语义执行：
-
-- `dbar` 等待此前的数据侧 Cache、非缓存访问和 AXI 数据事务全部完成，
-  并在完成前阻止后续访存越过。
-- `ibar` 在数据侧排空后 clean 全部 DCache dirty line，再 invalidate
-  全部 ICache line，最后清空年轻流水并从 `IBAR PC + 4` 重新取指。
-
-Cache 当前固定为 256 组、2 路，因此 `ibar` 分别扫描 DCache 和 ICache
-的 512 个行槽位。修改 Cache 组数或路数时，需要同步调整栅障扫描范围。
-
-### IDLE 指令
-
-支持 `idle level`，编码为 `32'h06488000 | level[14:0]`。指令进入 EX2
-后停止发起新的取指请求，并保持等待状态，直到复位或出现已使能、未屏蔽
-的中断。中断唤醒时保存的 ERA 为 `IDLE PC + 4`，因此中断处理执行
-`ertn` 后从 IDLE 的下一条指令继续运行。
-
-## CSR 实现
-
-当前 CSR 文件支持的主要寄存器：
+`csr_regfile.v` 当前实现的主要 CSR：
 
 ```text
-CRMD
-PRMD
-ECFG
-ESTAT
-ERA
-BADV
-EENTRY
-SAVE0, SAVE1, SAVE2, SAVE3
-TID
-TCFG
-TVAL
-TICLR
-LLBCTL
-TLBIDX
-TLBEHI
-TLBELO0
-TLBELO1
-ASID
-TLBRENTRY
-DMW0
-DMW1
+CRMD, PRMD, ECFG, ESTAT, ERA, BADV, EENTRY,
+TLBIDX, TLBEHI, TLBELO0, TLBELO1, ASID,
+PGDL, PGDH, PGD, CPUID,
+SAVE0, SAVE1, SAVE2, SAVE3,
+TID, TCFG, TVAL, TICLR, LLBCTL,
+TLBRENTRY, DMW0, DMW1
 ```
 
-LL.W/SC.W 使用 16 Byte 物理 Cache 行作为 reservation 粒度。Cached LL.W
-完成后建立 reservation；SC.W 仅在 reservation 匹配时写内存并向 `rd`
-返回 1，否则不写内存并返回 0。SC、`LLBCTL.WCLLB`、未受 KLO 保护的
-ERTN、同一行的 store、DCache 替换和 CACOP 无效化会清除 reservation。
-非缓存 LL.W 不建立 reservation，非缓存 SC.W 固定失败。
+异常进入时更新 `ESTAT.Ecode/EsubCode`、`ERA`、`BADV`，保存 `CRMD.PLV/IE`
+到 `PRMD` 并关闭当前中断使能。TLB 相关异常还会更新 `TLBEHI.VPPN`。
+`ECODE_TLBR` 使用 `TLBRENTRY` 作为入口，其余异常使用 `EENTRY`。
 
-关键行为：
+### 地址转换和 TLB
 
-- `CRMD.PG` 控制是否开启分页。
-- `CRMD.PLV` 参与 DMW 命中和 TLB 权限检查。
-- `PRMD` 保存异常前 `PLV/IE`，`ertn` 时恢复。
-- `EENTRY` 是普通异常入口。
-- `TLBRENTRY` 是 TLB refill 异常入口。
-- `BADV` 保存地址相关异常的出错虚地址。
-- TLB 相关异常会把出错虚地址的 `VPPN` 写入 `TLBEHI`。
-- `TLBIDX.NE` 表示 `tlbsrch` 或 `tlbrd` 未命中/无效。
-- `ASID` 保存当前地址空间编号。
-- `DMW0/DMW1` 提供直接映射窗口。
-
-## TLB 设计
-
-`tlb.v` 中每个表项包含：
+地址转换在 EX2 中完成，取指和数据访存共用同一套规则：
 
 ```text
-E
-VPPN
-PS
-ASID
-G
-PPN0, PLV0, MAT0, D0, V0
-PPN1, PLV1, MAT1, D1, V1
+CRMD.PG == 0          -> 直接地址模式，VA 作为 PA
+CRMD.PG == 1 且 DMW 命中 -> 使用 DMW 直接映射窗口
+CRMD.PG == 1 且 DMW 未命中 -> 查询 TLB
 ```
 
-查询端口：
+TLB 模块是参数化全相联结构，`mycpu_core` 中以 `TLBNUM=32` 实例化。它提供两个
+查询端口、一个读端口、一个写端口，支持 4KB、2MB、4MB 页大小匹配，支持 ASID
+和全局位 `G`。`tlbfill` 使用内部递增索引选择写入项，`invtlb` 支持 op 0 到 op 6。
 
-- `s0`: 取指地址转换。
-- `s1`: 数据地址转换，也复用于 `tlbsrch` 和 `invtlb` 匹配。
+当前支持的地址相关异常包括：
 
-页大小：
+- 普通异常：`INT`、`ADEF`、`ALE`、`SYS`、`BRK`、`INE`、`IPE`
+- MMU/TLB 异常：`TLBR`、`PIF`、`PIL`、`PIS`、`PME`、`PPI`
 
-- `PS == 12`: 4KB 页。
-- `PS == 22`: 4MB 页。
+### Cache 和访存
 
-TLB 命中条件：
+ICache 与 DCache 都是 2 路组相联、256 组、每行 16 Byte。每行由 4 个 32 位
+bank 组成，通过 4 拍 AXI burst 完成整行回填。顶层中 ICache 作为取指读通路使用，
+其 AXI 写回端未接入 bridge；DCache 使用写回策略，脏行替换或维护时会整行写回。
+
+DCache 访问由 EX3 发起。`MAT == 2'b00` 的数据访问走非缓存通路，其余访问走
+DCache。非缓存访问在 AXI bridge 中以单拍事务发出；Cache miss、回填和写回使用
+4 拍 burst。
+
+`CACOP` 支持按索引和按命中地址维护。`IBAR` 由 `barrier_ctrl` 驱动，流程为：
 
 ```text
-表项 E 有效
-G 为 1 或 ASID 匹配
-VPPN 按页大小匹配
+等待数据侧空闲 -> clean 全部 DCache 行 -> 等待写回完成 -> invalidate 全部 ICache 行 -> 重定向到 IBAR PC + 4
 ```
 
-命中后根据奇偶页选择 `PPN0` 或 `PPN1`。4KB 页使用 `VA[12]` 区分奇偶页，4MB 页按大页规则拼接物理地址。
+由于 Cache 当前为 2 路、256 组，`IBAR` 对 DCache 和 ICache 各扫描 512 个行槽。
 
-## 虚实地址转换
+### LL/SC
 
-当前地址转换在 `exe_stage.v` 的 EX2 部分完成。
+`llsc_unit.v` 维护一个 reservation，粒度为 16B 物理 cache line。`ll.w` 在 MEM
+退休时建立 reservation；`sc.w` 在 EX3 查询 reservation，命中时才允许真正写内存，
+并在 MEM 退休时返回 1，否则不写内存并返回 0。`sc.w`、`LLBCTL.WCLLB`、未被
+`LLBCTL.KLO` 保护的 `ertn` 会清除 reservation。
 
-取指和数据访存都遵循以下流程：
+### DBAR、IBAR 和 IDLE
+
+`DBAR` 会等待数据侧事务排空。`IBAR` 在数据侧排空后执行 DCache clean 和 ICache
+invalidate，并在完成后冲刷流水线，从 `IBAR PC + 4` 重新取指。当前实现不区分
+hint 等级。
+
+`IDLE` 进入 EX3 后停止发起新的取指请求，等待已使能且未屏蔽的中断唤醒。被中断
+唤醒时，异常返回地址按 `IDLE PC + 4` 处理。
+
+## AXI 与集成接口
+
+顶层模块为 `core_top`，时钟和复位为：
+
+```verilog
+input aclk;
+input aresetn; // low active
+```
+
+外部接口包括：
+
+- 32 位 AXI 读写主接口，ID 宽度 4 位，数据宽度 32 位。
+- 8 路硬件中断输入 `intrpt[7:0]`，未使用时可接 0。
+- trace 输出：`debug0_wb_pc`、`debug0_wb_rf_wen`、`debug0_wb_rf_wnum`、`debug0_wb_rf_wdata`。
+- 调试读寄存器接口：`break_point`、`infor_flag`、`reg_num`、`ws_valid`、`rf_rdata`。
+
+`sram_axi_bridge_2x1` 是单事务状态机，仲裁优先级为：
 
 ```text
-CRMD.PG == 0
-    -> 直接地址模式，虚地址作为物理地址
-
-CRMD.PG == 1 且 DMW 命中
-    -> 使用 DMW 直接映射
-
-CRMD.PG == 1 且 DMW 未命中
-    -> 查询 TLB
+uncached write/read > DCache writeback > DCache refill > ICache refill
 ```
 
-DMW 命中条件：
+读通道通过 `arlen=0` 发起非缓存单拍读，通过 `arlen=3` 发起 Cache 行回填。
+写通道通过 `awlen=0` 发起非缓存单拍写，通过 `awlen=3` 发起 DCache 脏行写回。
 
-- 当前特权级被 DMW 允许。
-- 虚地址高 3 位匹配 DMW 的 `VSEG`。
+## 冒险和前递
 
-DMW 物理地址拼接：
+ID 级同时观察 EX1、EX2、EX3、MEM、WB 五个 older producer，并按最近的 older
+producer 优先：
 
 ```text
-{DMW.PSEG, VA[28:0]}
+EX1 > EX2 > EX3 > MEM > WB
 ```
 
-TLB 物理地址拼接：
+只有 producer 标记 `result_ready` 时才前递；load、CSR、乘除法、SC 等结果未就绪
+时会阻塞 ID。分支比较复用同一套前递选择，因此 load 后分支、连续写同一目的寄存器
+等场景按顺序语义处理。
+
+CSR 写后读、`ertn`、TLB 指令、异常状态相关操作会触发额外阻塞，避免特权状态在
+提交点之前被 younger 指令观察到。
+
+## 乘除法实现
+
+`alu.v` 中普通 ALU 操作仍为组合逻辑。乘法使用 `piped_multiplier`，除法和取模
+使用 `iter_divider` 迭代实现，避免综合出长组合除法路径。EX2 会在乘除法未完成时
+保持阻塞；flush、`ertn` 或 `ibar` 会取消相关状态。
+
+## 仿真和验证状态
+
+仓库目前没有独立 testbench、SoC harness、镜像加载脚本或约束文件。可直接综合/分析
+的 RTL 顶层是 `core_top`；如果需要接入 Difftest，请定义 `SIMU` 并提供对应的
+`Difftest*` 模块。
+
+建议的最小检查流程：
 
 ```text
-4KB 页: {PPN[19:0], VA[11:0]}
-4MB 页: {PPN[19:10], VA[21:0]}
+1. 将根目录全部 .v 文件加入 Vivado/iverilog/Verilator 工程。
+2. 未提供 Difftest 模块时不要定义 SIMU。
+3. 以 core_top 为顶层做语法分析和 elaboration。
+4. 在 SoC/testbench 中覆盖算术、分支、load/store、CSR、异常、中断、TLB、
+   Cache、LL/SC、DBAR/IBAR、IDLE 和非缓存访问。
 ```
 
-## 异常和中断
-
-当前支持的普通异常：
-
-- `INT`: 中断。
-- `ADEF`: 取指地址错。
-- `ALE`: 访存地址非对齐。
-- `SYS`: `syscall`。
-- `BRK`: `break`。
-- `INE`: 指令不存在。
-
-支持的 TLB/MMU 异常：
-
-- `TLBR`: TLB refill，TLB 重填例外。
-- `PIF`: 取指页无效例外。
-- `PIL`: load 页无效例外。
-- `PIS`: store 页无效例外。
-- `PME`: 页修改例外。
-- `PPI`: 页特权等级不合规例外。
-
-TLB 异常判断：
-
-```text
-TLB 未命中                      -> TLBR
-取指命中但 V == 0               -> PIF
-load 命中但 V == 0               -> PIL
-store 命中但 V == 0              -> PIS
-store 命中有效页但 D == 0        -> PME
-当前 PLV 权限大于页表项 PLV      -> PPI
-```
-
-异常入口选择：
-
-```text
-Ecode == TLBR -> TLBRENTRY
-其他异常      -> EENTRY
-```
-
-异常发生时：
-
-1. 写入 `ESTAT.Ecode/EsubCode`。
-2. 写入 `ERA`。
-3. 地址相关异常写入 `BADV`。
-4. TLB 相关异常更新 `TLBEHI.VPPN`。
-5. 保存 `CRMD.PLV/IE` 到 `PRMD`。
-6. 关闭当前中断使能。
-7. 冲刷流水线并跳转到异常入口。
-
-`ertn` 执行时：
-
-1. 从 `ERA` 返回。
-2. 从 `PRMD` 恢复 `CRMD.PLV/IE`。
-3. 清理异常返回导致的流水线副作用。
-
-## 流水线和冒险处理
-
-ID 阶段负责主要冒险检测：
-
-- EX1/EX2/MEM/WB 到 ID 的数据前递。
-- producer 结果未就绪时阻塞，包括 load-use、除法、CSR、SC 等晚产生结果。
-- CSR 写后读冒险阻塞。
-- `ertn`、中断相关 CSR 和异常状态相关阻塞。
-- TLB 指令作为系统类指令处理。
-
-当前版本按“最近的 older producer 优先”选择前递源：
-
-```text
-EX1 > EX2 > MEM > WB
-```
-
-只有对应 producer 声明 `result_ready` 时才允许前递；若命中目标寄存器但结果尚未就绪，
-ID 保持阻塞，避免使用 load、CSR、除法或 SC 的未完成结果。分支比较也使用同一套前递
-结果，因此 load 后分支、连续写同一目的寄存器等场景会按顺序语义处理。
-
-控制重定向统一为 `redirect_valid/redirect_pc`，优先级为 `ertn > exception > ibar > branch`。
-重定向会清空年轻流水，并通过 IF1/IF2 的 cancel 路径丢弃旧取指响应。
-
-## 除法器和时序优化
-
-原先如果直接使用 Verilog 的 `/` 和 `%` 组合除法，实现中会形成非常长的关键路径。
-
-当前 `alu.v` 中新增 `iter_divider`：
-
-- 32 轮迭代恢复除法。
-- 支持有符号和无符号除法。
-- 同时支持商和余数输出。
-- EX2 阶段遇到 `div.w/div.wu/mod.w/mod.wu` 时暂停流水。
-- flush 或 `ertn` 时取消当前除法状态。
-
-## AXI 相关设计
-
-### IF 请求 PC 稳定化
-
-AXI 环境下，取指请求的地址通道和数据返回通道不是同一拍完成。若地址请求发出后发生跳转、异常或 flush，`fetch_pc` 可能已经变化，而旧请求的数据稍后才返回。
-
-为避免旧响应被错误绑定到新 PC，`if_stage.v` 的 IF1/IF2 边界携带：
-
-```text
-req_pc
-req_cancel
-```
-
-现在取指响应对应的 PC 使用请求发出时保存的 PC，不是实时变化的 `fetch_pc`。如果请求期间发生重定向，会通过 `req_cancel` 或 IF2 的 `resp_cancel` 抑制旧响应进入流水线。
-
-### SRAM-to-AXI bridge 请求寄存化
-
-`core_top.v` 中的 `sram_axi_bridge_2x1` 做了请求寄存化：
-
-- 在 IDLE 状态捕获读写请求。
-- 下一拍再发 AXI 地址通道。
-- 读事务增加 `ST_RD_ADDR` 状态。
-- 写事务保存地址、数据和写掩码后再进入 AXI 写地址/写数据阶段。
-
-这切断了：
-
-```text
-EX2 访存地址计算 -> AXI RAM/IP 输入
-```
-
-从而让设计能够满足实现时序。
-
-### Cache burst 传输
-
-指令 Cache 行大小为 16 Byte，每行包含 4 个 32 位字。AXI bridge 对 ICache 回填请求生成：
-
-```text
-ARLEN   = 3
-ARSIZE  = 2
-ARBURST = INCR
-```
-
-读响应阶段会保持到 `RLAST` 到达，并将每拍 `RDATA` 依次送入对应 Cache
-的 `ret_valid/ret_last/ret_data` 接口。ICache 和 DCache 都以 4 拍 burst
-完成整行回填；两者的脏行写回同样使用 4 拍 burst。非缓存数据访问使用
-单拍 AXI 事务。
-
-## 当前验证状态
-
-仓库内包含 `docs/phase7_verification_report.md`，记录了七级流水版本的仓库本地静态检查结果。
-
-已完成的检查：
-
-- 使用 Vivado 2023.2 `xvlog` 分析根目录全部 RTL 源文件，通过。
-- 使用 `xelab -timescale 1ns/1ps core_top` 静态展开顶层，通过。
-- 扫描 `xvlog.log`、`xelab.log` 中的 `ERROR`、`WARNING`、`CRITICAL`，未发现匹配项。
-- `git diff --check` 未发现空白错误；当前只会提示部分文件未来可能被 Git 做 LF/CRLF 归一化。
-
-尚未在本仓库内完成的检查：
-
-- 算术、跳转、load/store、CSR、异常、中断、TLB、cache、LL/SC、barrier 等动态程序测试。
-- 随机指令流或 Difftest 执行。
-- 需要 testbench、SoC harness、可执行镜像加载流程、中断/cache/TLB 激励或外部 Difftest 环境的验证项。
-
-## 目录和文件
-
-根目录下的 Verilog 文件是当前 CPU 的主实现：
+## 目录文件
 
 ```text
 alu.v
 barrier_ctrl.v
 core_top.v
-icache.v
-dcache.v
 csr_regfile.v
+dcache.v
 decoder_2_4.v
 decoder_4_16.v
 decoder_5_32.v
 decoder_6_64.v
 exe_stage.v
+icache.v
 id_stage.v
 if_stage.v
 llsc_unit.v
@@ -600,35 +269,3 @@ regfile.v
 tlb.v
 wb_stage.v
 ```
-
-## 集成接口
-
-`core_top` 使用低有效复位 `aresetn`，时钟端口为 `aclk`。主要外部接口：
-
-- AXI：32 位地址、32 位数据、4 位 ID，支持 burst 读写。
-- 中断：`intrpt[7:0]`。
-- 提交跟踪：`debug0_wb_pc`、`debug0_wb_rf_wen`、
-  `debug0_wb_rf_wnum`、`debug0_wb_rf_wdata`。
-- 调试读取：`break_point`、`infor_flag`、`reg_num`、`ws_valid`、
-  `rf_rdata`。
-
-RTL 使用 Verilog-2001 风格代码，并在部分模块中使用存储器数组。具体综合、
-仿真命令取决于接入的 FPGA/ASIC 工具链和 SoC 验证环境。
-
-## 全局宏定义（`mycpu.vh`）
-
-`mycpu.vh` 定义了流水线数据通路宽度、异常编码和中断位编号，被各模块通过 `include` 引用。主要常量包括：
-
-- 流水总线相关：ALU 结果、访存地址、写回数据等信号的位宽定义。
-- 异常码：`ADEF`、`ALE`、`SYS`、`BRK`、`INE`、`TLBR`、`PIF`、`PIL`、`PIS`、`PME`、`PPI`、`INT`。
-- 中断位编号：`int_hw_pin`、`int_timer`、`int_ipi`。
-
-## 设计要点
-
-### CSR/TLB 副作用只在 EX2 提交点发生
-
-TLB 指令和 CSR 写指令的状态修改都由 EX2 阶段在提交点统一控制。如果指令被异常、`ertn` 或 flush 冲刷，不会错误修改 TLB 或 CSR。这是保证正确性的关键设计。
-
-### Cache 一致性
-
-数据访存使用 DCache，ICache 和 DCache 分别通过 AXI bridge 与外部交互。bridge 在 IDLE 状态下优先接受数据 SRAM 请求，其次接受 ICache 回填请求，保证两类事务不会在 AXI 读通道上交叉。

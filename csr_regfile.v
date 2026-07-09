@@ -85,6 +85,7 @@ localparam CSR_ASID   = 14'h18;
 localparam CSR_PGDL   = 14'h19;
 localparam CSR_PGDH   = 14'h1A;
 localparam CSR_PGD    = 14'h1B;
+localparam CSR_CPUID  = 14'h20;
 localparam CSR_SAVE0  = 14'h30;
 localparam CSR_SAVE1  = 14'h31;
 localparam CSR_SAVE2  = 14'h32;
@@ -210,6 +211,7 @@ always @(*) begin
             CSR_PGDL:   csr_rvalue_reg = pgdl;
             CSR_PGDH:   csr_rvalue_reg = pgdh;
             CSR_PGD:    csr_rvalue_reg = badv[31] ? pgdh : pgdl;
+            CSR_CPUID:  csr_rvalue_reg = 32'b0;
             CSR_SAVE0:  csr_rvalue_reg = save0;
             CSR_SAVE1:  csr_rvalue_reg = save1;
             CSR_SAVE2:  csr_rvalue_reg = save2;
@@ -328,16 +330,16 @@ always @(posedge clk) begin
         if (csr_inst_we) begin
             case (csr_num)
                 CSR_CRMD:   crmd   <= crmd_wdata & 32'h000001ff;
-                CSR_PRMD:   prmd   <= prmd_wdata;
+                CSR_PRMD:   prmd   <= prmd_wdata & 32'h00000007;
                 CSR_ECFG:   ecfg   <= ecfg_legal_wdata;
                 CSR_ESTAT:  estat[1:0] <= (estat[1:0] & ~csr_wmask[1:0]) | (csr_wvalue[1:0] & csr_wmask[1:0]);
                 CSR_ERA:    era    <= era_wdata;
                 CSR_BADV:   badv   <= badv_wdata;
-                CSR_EENTRY: eentry <= eentry_wdata;
+                CSR_EENTRY: eentry <= eentry_wdata & 32'hffffffc0;
                 CSR_TLBIDX: tlbidx <= tlbidx_wdata & 32'hbf00001f;
                 CSR_TLBEHI: tlbehi <= tlbehi_wdata & 32'hffffe000;
-                CSR_TLBELO0:tlbelo0 <= tlbelo0_wdata & 32'h0fffffff;
-                CSR_TLBELO1:tlbelo1 <= tlbelo1_wdata & 32'h0fffffff;
+                CSR_TLBELO0:tlbelo0 <= tlbelo0_wdata & 32'h0fffff7f;
+                CSR_TLBELO1:tlbelo1 <= tlbelo1_wdata & 32'h0fffff7f;
                 CSR_ASID:   asid <= asid_wdata[9:0];
                 CSR_PGDL:   pgdl <= pgdl_wdata & 32'hfffff000;
                 CSR_PGDH:   pgdh <= pgdh_wdata & 32'hfffff000;
@@ -364,7 +366,7 @@ always @(posedge clk) begin
                         llbctl_klo_r <= csr_wvalue[2];
                     end
                 end
-                CSR_TLBRENTRY: tlbrentry <= tlbrentry_wdata;
+                CSR_TLBRENTRY: tlbrentry <= tlbrentry_wdata & 32'hffffffc0;
                 CSR_DMW0:   dmw0 <= dmw0_wdata & 32'hee000039;
                 CSR_DMW1:   dmw1 <= dmw1_wdata & 32'hee000039;
                 default: ;
@@ -411,8 +413,7 @@ always @(posedge clk) begin
         // Hardware exception save (overrides CSR writes)
         // ====================================================
         if (wb_ex) begin
-            prmd[1:0] <= crmd[1:0];
-            prmd[2]   <= crmd[2];
+            prmd      <= {29'b0, crmd[2], crmd[1:0]};
             crmd[1:0] <= 2'b00;
             crmd[2]   <= 1'b0;
             if (wb_ecode == `ECODE_TLBR) begin

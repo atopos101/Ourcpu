@@ -155,76 +155,76 @@ function inv_match;
     end
 endfunction
 
-integer s0_i;
-always @(*) begin
-    s0_found = 1'b0;
-    s0_index = 0;
-    s0_ppn   = 20'b0;
-    s0_ps    = 6'b0;
-    s0_plv   = 2'b0;
-    s0_mat   = 2'b0;
-    s0_d     = 1'b0;
-    s0_v     = 1'b0;
+wire [TLBNUM-1:0] s0_match_vec;
+wire [TLBNUM-1:0] s1_match_vec;
+wire              s0_found_w;
+wire              s1_found_w;
+wire [$clog2(TLBNUM)-1:0] s0_index_w;
+wire [$clog2(TLBNUM)-1:0] s1_index_w;
+wire              s0_odd_w;
+wire              s1_odd_w;
 
-    for (s0_i = 0; s0_i < TLBNUM; s0_i = s0_i + 1) begin
-        if (!s0_found && tlb_e[s0_i]
-            && (tlb_g[s0_i] || (tlb_asid[s0_i] == s0_asid))
-            && vppn_match(s0_vppn, tlb_vppn[s0_i], tlb_ps[s0_i])) begin
-            s0_found = 1'b1;
-            s0_index = s0_i;
-            s0_ps    = tlb_ps[s0_i];
-            if (odd_page(s0_vppn, s0_va_bit12, tlb_ps[s0_i])) begin
-                s0_ppn = tlb_ppn1[s0_i];
-                s0_plv = tlb_plv1[s0_i];
-                s0_mat = tlb_mat1[s0_i];
-                s0_d   = tlb_d1  [s0_i];
-                s0_v   = tlb_v1  [s0_i];
-            end
-            else begin
-                s0_ppn = tlb_ppn0[s0_i];
-                s0_plv = tlb_plv0[s0_i];
-                s0_mat = tlb_mat0[s0_i];
-                s0_d   = tlb_d0  [s0_i];
-                s0_v   = tlb_v0  [s0_i];
+genvar match_i;
+generate
+    for (match_i = 0; match_i < TLBNUM; match_i = match_i + 1) begin : gen_match
+        assign s0_match_vec[match_i] =
+            tlb_e[match_i] &&
+            (tlb_g[match_i] || (tlb_asid[match_i] == s0_asid)) &&
+            vppn_match(s0_vppn, tlb_vppn[match_i], tlb_ps[match_i]);
+        assign s1_match_vec[match_i] =
+            tlb_e[match_i] &&
+            (tlb_g[match_i] || (tlb_asid[match_i] == s1_asid)) &&
+            vppn_match(s1_vppn, tlb_vppn[match_i], tlb_ps[match_i]);
+    end
+endgenerate
+
+assign s0_found_w = |s0_match_vec;
+assign s1_found_w = |s1_match_vec;
+
+function [$clog2(TLBNUM)-1:0] first_match_index;
+    input [TLBNUM-1:0] match_vec;
+    integer pe_i;
+    begin
+        first_match_index = {$clog2(TLBNUM){1'b0}};
+        for (pe_i = TLBNUM - 1; pe_i >= 0; pe_i = pe_i - 1) begin
+            if (match_vec[pe_i]) begin
+                first_match_index = pe_i[$clog2(TLBNUM)-1:0];
             end
         end
     end
+endfunction
+
+assign s0_index_w = first_match_index(s0_match_vec);
+assign s1_index_w = first_match_index(s1_match_vec);
+assign s0_odd_w   = odd_page(s0_vppn, s0_va_bit12, tlb_ps[s0_index_w]);
+assign s1_odd_w   = odd_page(s1_vppn, s1_va_bit12, tlb_ps[s1_index_w]);
+
+always @(*) begin
+    s0_found = s0_found_w;
+    s0_index = s0_index_w;
+    s0_ps    = s0_found_w ? tlb_ps[s0_index_w] : 6'b0;
+    s0_ppn   = !s0_found_w ? 20'b0 :
+               s0_odd_w    ? tlb_ppn1[s0_index_w] : tlb_ppn0[s0_index_w];
+    s0_plv   = !s0_found_w ? 2'b0 :
+               s0_odd_w    ? tlb_plv1[s0_index_w] : tlb_plv0[s0_index_w];
+    s0_mat   = !s0_found_w ? 2'b0 :
+               s0_odd_w    ? tlb_mat1[s0_index_w] : tlb_mat0[s0_index_w];
+    s0_d     = s0_found_w && (s0_odd_w ? tlb_d1[s0_index_w] : tlb_d0[s0_index_w]);
+    s0_v     = s0_found_w && (s0_odd_w ? tlb_v1[s0_index_w] : tlb_v0[s0_index_w]);
 end
 
-integer s1_i;
 always @(*) begin
-    s1_found = 1'b0;
-    s1_index = 0;
-    s1_ppn   = 20'b0;
-    s1_ps    = 6'b0;
-    s1_plv   = 2'b0;
-    s1_mat   = 2'b0;
-    s1_d     = 1'b0;
-    s1_v     = 1'b0;
-
-    for (s1_i = 0; s1_i < TLBNUM; s1_i = s1_i + 1) begin
-        if (!s1_found && tlb_e[s1_i]
-            && (tlb_g[s1_i] || (tlb_asid[s1_i] == s1_asid))
-            && vppn_match(s1_vppn, tlb_vppn[s1_i], tlb_ps[s1_i])) begin
-            s1_found = 1'b1;
-            s1_index = s1_i;
-            s1_ps    = tlb_ps[s1_i];
-            if (odd_page(s1_vppn, s1_va_bit12, tlb_ps[s1_i])) begin
-                s1_ppn = tlb_ppn1[s1_i];
-                s1_plv = tlb_plv1[s1_i];
-                s1_mat = tlb_mat1[s1_i];
-                s1_d   = tlb_d1  [s1_i];
-                s1_v   = tlb_v1  [s1_i];
-            end
-            else begin
-                s1_ppn = tlb_ppn0[s1_i];
-                s1_plv = tlb_plv0[s1_i];
-                s1_mat = tlb_mat0[s1_i];
-                s1_d   = tlb_d0  [s1_i];
-                s1_v   = tlb_v0  [s1_i];
-            end
-        end
-    end
+    s1_found = s1_found_w;
+    s1_index = s1_index_w;
+    s1_ps    = s1_found_w ? tlb_ps[s1_index_w] : 6'b0;
+    s1_ppn   = !s1_found_w ? 20'b0 :
+               s1_odd_w    ? tlb_ppn1[s1_index_w] : tlb_ppn0[s1_index_w];
+    s1_plv   = !s1_found_w ? 2'b0 :
+               s1_odd_w    ? tlb_plv1[s1_index_w] : tlb_plv0[s1_index_w];
+    s1_mat   = !s1_found_w ? 2'b0 :
+               s1_odd_w    ? tlb_mat1[s1_index_w] : tlb_mat0[s1_index_w];
+    s1_d     = s1_found_w && (s1_odd_w ? tlb_d1[s1_index_w] : tlb_d0[s1_index_w]);
+    s1_v     = s1_found_w && (s1_odd_w ? tlb_v1[s1_index_w] : tlb_v0[s1_index_w]);
 end
 
 integer inv_i;

@@ -17,9 +17,6 @@ wire op_sll;   //logic left shift
 wire op_srl;   //logic right shift
 wire op_sra;   //arithmetic right shift
 wire op_lui;   //Load Upper Immediate
-wire op_mul;   //signed multiplication low
-wire op_mulh;  //signed multiplication high
-wire op_mulhu; //unsigned multiplication high
 
 // control code decomposition
 assign op_add  = alu_op[ 0];
@@ -34,9 +31,6 @@ assign op_sll  = alu_op[ 8];
 assign op_srl  = alu_op[ 9];
 assign op_sra  = alu_op[10];
 assign op_lui  = alu_op[11];
-assign op_mul  = alu_op[13];
-assign op_mulh = alu_op[14];
-assign op_mulhu= alu_op[15];
 
 wire [31:0] add_sub_result;
 wire [31:0] slt_result;
@@ -49,14 +43,6 @@ wire [31:0] lui_result;
 wire [31:0] sll_result;
 wire [63:0] sr64_result;
 wire [31:0] sr_result;
-
-// multiplication results
-wire [63:0] mul_signed;
-wire [63:0] mul_unsigned;
-wire [31:0] mul_result;
-wire [31:0] mulh_result;
-wire [31:0] mulhu_result;
-
 
 // 32-bit adder
 wire [31:0] adder_a;
@@ -97,13 +83,6 @@ assign sr64_result = {{32{op_sra & alu_src1[31]}}, alu_src1[31:0]} >> alu_src2[4
 
 assign sr_result   = sr64_result[31:0];
 
-// multiplication
-assign mul_signed   = $signed(alu_src1) * $signed(alu_src2);
-assign mul_unsigned = alu_src1 * alu_src2;
-assign mul_result   = mul_signed[31:0];
-assign mulh_result  = mul_signed[63:32];
-assign mulhu_result = mul_unsigned[63:32];
-
 // final result mux
 assign alu_result = ({32{op_add|op_sub}} & add_sub_result)
                   | ({32{op_slt       }} & slt_result)
@@ -114,10 +93,46 @@ assign alu_result = ({32{op_add|op_sub}} & add_sub_result)
                   | ({32{op_xor       }} & xor_result)
                   | ({32{op_lui       }} & lui_result)
                   | ({32{op_sll       }} & sll_result)
-                  | ({32{op_srl|op_sra}} & sr_result)
-                  | ({32{op_mul       }} & mul_result)
-                  | ({32{op_mulh      }} & mulh_result)
-                  | ({32{op_mulhu     }} & mulhu_result);
+                  | ({32{op_srl|op_sra}} & sr_result);
+
+endmodule
+
+module piped_multiplier(
+    input             clk,
+    input             reset,
+    input             cancel,
+    input             start,
+    input      [31:0] src1,
+    input      [31:0] src2,
+    input             signed_hi,
+    input             high_result,
+    output reg        busy,
+    output reg        done,
+    output reg [31:0] result
+);
+
+wire signed [32:0] signed_src1 = {signed_hi && src1[31], src1};
+wire signed [32:0] signed_src2 = {signed_hi && src2[31], src2};
+wire signed [65:0] full_result = signed_src1 * signed_src2;
+wire [31:0] next_result = high_result ? full_result[63:32] :
+                                         full_result[31:0];
+
+always @(posedge clk) begin
+    if (reset || cancel) begin
+        busy   <= 1'b0;
+        done   <= 1'b0;
+        result <= 32'b0;
+    end
+    else if (start && !busy && !done) begin
+        busy   <= 1'b1;
+        done   <= 1'b0;
+        result <= next_result;
+    end
+    else if (busy) begin
+        busy <= 1'b0;
+        done <= 1'b1;
+    end
+end
 
 endmodule
 
