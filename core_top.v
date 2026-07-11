@@ -796,6 +796,10 @@ wire        ex2_is_ertn;
 wire        ex3_csr_we;
 wire [13:0] ex3_csr_num;
 wire        ex3_is_ertn;
+wire        ex1_tlb_pending;
+wire        ex2_tlb_pending;
+wire        ex3_tlb_pending;
+wire [`EX3_PRIV_COMMIT_BUS_WD-1:0] priv_commit_bus;
 wire [31:0] ex2_cnt_low;
 wire [31:0] ex2_cnt_high;
 wire [31:0] ex2_tid;
@@ -933,6 +937,9 @@ id_stage id_stage(
     .ex3_csr_we     (ex3_csr_we     ),
     .ex3_csr_num    (ex3_csr_num    ),
     .ex3_is_ertn    (ex3_is_ertn    ),
+    .ex1_tlb_pending(ex1_tlb_pending),
+    .ex2_tlb_pending(ex2_tlb_pending),
+    .ex3_tlb_pending(ex3_tlb_pending),
     .ertn_flush     (ertn_flush     )
 );
 
@@ -955,7 +962,8 @@ ex1_stage ex1_stage(
     .ex1_to_ds_result(ex1_to_ds_result),
     .ex1_csr_we     (ex1_csr_we     ),
     .ex1_csr_num    (ex1_csr_num    ),
-    .ex1_is_ertn    (ex1_is_ertn    )
+    .ex1_is_ertn    (ex1_is_ertn    ),
+    .ex1_tlb_pending(ex1_tlb_pending)
 );
 
 // EX2 stage: privileged state, exceptions, translation, and memory requests.
@@ -965,8 +973,10 @@ ex2_stage ex2_stage(
     //allowin
     .ex3_allowin    (ex3_allowin    ),
     .older_pipe_empty(ex3_empty && ms_empty && ws_empty),
+    .priv_commit_bus(priv_commit_bus),
     .ex2_allowin    (ex2_allowin    ),
     .ex2_empty      (ex2_empty      ),
+    .ex2_tlb_pending(ex2_tlb_pending),
     //from ex1
     .ex1_to_ex2_valid(ex1_to_ex2_valid),
     .ex1_to_ex2_bus (ex1_to_ex2_bus ),
@@ -1026,9 +1036,9 @@ ex2_stage ex2_stage(
     .cnt_high_out   (ex2_cnt_high    ),
     .tid_out        (ex2_tid         ),
     .has_int_out    (ex2_has_int     ),
-    .sc_query_line  (sc_query_line  ),
-    .sc_query_cached(sc_query_cached),
-    .sc_can_store   (sc_can_store   ),
+    .sc_query_line  (),
+    .sc_query_cached(),
+    .sc_can_store   (1'b0          ),
     .reservation_valid(reservation_current),
     .llbctl_klo     (llbctl_klo     ),
     .wcllb_commit   (wcllb_commit   ),
@@ -1091,7 +1101,12 @@ ex3_stage ex3_stage(
     .cnt_low_now      (ex2_cnt_low      ),
     .cnt_high_now     (ex2_cnt_high     ),
     .tid_now          (ex2_tid          ),
-    .has_int_now      (ex2_has_int      )
+    .has_int_now      (ex2_has_int      ),
+    .sc_query_line    (sc_query_line    ),
+    .sc_query_cached  (sc_query_cached  ),
+    .sc_can_store     (sc_can_store     ),
+    .priv_commit_bus  (priv_commit_bus  ),
+    .ex3_tlb_pending  (ex3_tlb_pending  )
 );
 
 // MEM stage

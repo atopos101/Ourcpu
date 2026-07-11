@@ -9,7 +9,8 @@
 `define IF2_TO_ID_BUS_WD  80    // {inst[31:0], pc[31:0], ex, ecode[5:0], esubcode[8:0]}
 `define ID_TO_EX1_BUS_WD  250   // DS_TO_ES payload + instruction for aligned Difftest sideband
 `define EX1_TO_EX2_BUS_WD 350   // {alu_result, mem_addr, store_wdata, store_wstrb, ID_TO_EX1 payload}
-`define EX2_TO_EX3_BUS_WD 658   // {EX2 sideband, EX1_TO_EX2 payload}
+`define EX2_TO_EX3_BUS_WD 747   // {TLB write snapshot, EX2 sideband, EX1_TO_EX2 payload}
+`define EX3_PRIV_COMMIT_BUS_WD 306 // EX3 -> CSR/TLB architectural commit payload
 `define EX3_TO_MEM_BUS_WD 107   // EX3_TO_MEM payload, same layout as ES_TO_MS
 `define EX2_TO_MEM_BUS_WD 107   // legacy payload width
 

@@ -8,6 +8,7 @@ module csr_regfile(
     input  [13:0] csr_num,
     output [31:0] csr_rvalue,
     input         csr_we,
+    input  [13:0] csr_wnum,
     input  [31:0] csr_wmask,
     input  [31:0] csr_wvalue,
     // hardware exception interface
@@ -164,7 +165,7 @@ assign csr_asid         = asid;
 assign csr_tlbidx_index = tlbidx[4:0];
 assign csr_tlbidx_ps    = tlbidx[29:24];
 assign csr_tlbidx_ne    = tlbidx[31];
-assign wcllb_commit = csr_inst_we && (csr_num == CSR_LLBCTL) &&
+assign wcllb_commit = csr_inst_we && (csr_wnum == CSR_LLBCTL) &&
                       csr_wmask[1] && csr_wvalue[1];
 
 // ============================================================
@@ -320,7 +321,7 @@ always @(posedge clk) begin
         if (timer_will_expire) begin
             timer_pending <= 1'b1;
         end
-        if (csr_inst_we && csr_num == CSR_TICLR && csr_wmask[0] && csr_wvalue[0]) begin
+        if (csr_inst_we && csr_wnum == CSR_TICLR && csr_wmask[0] && csr_wvalue[0]) begin
             timer_pending <= 1'b0;
         end
 
@@ -328,7 +329,7 @@ always @(posedge clk) begin
         // CSR instruction writes (before wb_ex to avoid override)
         // ====================================================
         if (csr_inst_we) begin
-            case (csr_num)
+            case (csr_wnum)
                 CSR_CRMD:   crmd   <= crmd_wdata & 32'h000001ff;
                 CSR_PRMD:   prmd   <= prmd_wdata & 32'h00000007;
                 CSR_ECFG:   ecfg   <= ecfg_legal_wdata;

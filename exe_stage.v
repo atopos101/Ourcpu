@@ -18,7 +18,8 @@ module ex1_stage(
     output [31:0]                 ex1_to_ds_result,
     output                        ex1_csr_we,
     output [13:0]                 ex1_csr_num,
-    output                        ex1_is_ertn
+    output                        ex1_is_ertn,
+    output                        ex1_tlb_pending
 );
 
 reg         ex1_valid;
@@ -159,6 +160,7 @@ assign ex1_to_ds_result  = alu_result;
 assign ex1_csr_we        = (csr_op == 2'b10 || csr_op == 2'b11) && ex1_valid;
 assign ex1_csr_num       = csr_num;
 assign ex1_is_ertn       = inst_ertn && ex1_valid;
+assign ex1_tlb_pending   = ex1_valid && (tlb_op != 3'b0);
 
 endmodule
 
@@ -216,7 +218,12 @@ module ex3_stage(
     input  [31:0] cnt_low_now,
     input  [31:0] cnt_high_now,
     input  [31:0] tid_now,
-    input         has_int_now
+    input         has_int_now,
+    output [27:0] sc_query_line,
+    output        sc_query_cached,
+    input         sc_can_store,
+    output [`EX3_PRIV_COMMIT_BUS_WD-1:0] priv_commit_bus,
+    output        ex3_tlb_pending
 );
 
 reg         ex3_valid;
@@ -224,6 +231,7 @@ reg [`EX2_TO_EX3_BUS_WD -1:0] ex2_to_ex3_bus_r;
 reg [31:0] cnt_low_sample;
 reg [31:0] cnt_high_sample;
 reg [31:0] tid_sample;
+reg        has_int_live_r;
 
 wire [`EX1_TO_EX2_BUS_WD -1:0] ex1_to_ex2_bus_saved;
 wire [31:0] side_data_paddr;
@@ -260,8 +268,38 @@ wire        side_tlbrd_d1;
 wire        side_tlbrd_v1;
 wire        side_ex_int_pre;
 wire [ 4:0] side_tlb_write_index;
+wire        side_tlb_w_e;
+wire [18:0] side_tlb_w_vppn;
+wire [ 5:0] side_tlb_w_ps;
+wire [ 9:0] side_tlb_w_asid;
+wire        side_tlb_w_g;
+wire [19:0] side_tlb_w_ppn0;
+wire [ 1:0] side_tlb_w_plv0;
+wire [ 1:0] side_tlb_w_mat0;
+wire        side_tlb_w_d0;
+wire        side_tlb_w_v0;
+wire [19:0] side_tlb_w_ppn1;
+wire [ 1:0] side_tlb_w_plv1;
+wire [ 1:0] side_tlb_w_mat1;
+wire        side_tlb_w_d1;
+wire        side_tlb_w_v1;
 
-assign {side_data_paddr,
+assign {side_tlb_w_e,
+        side_tlb_w_vppn,
+        side_tlb_w_ps,
+        side_tlb_w_asid,
+        side_tlb_w_g,
+        side_tlb_w_ppn0,
+        side_tlb_w_plv0,
+        side_tlb_w_mat0,
+        side_tlb_w_d0,
+        side_tlb_w_v0,
+        side_tlb_w_ppn1,
+        side_tlb_w_plv1,
+        side_tlb_w_mat1,
+        side_tlb_w_d1,
+        side_tlb_w_v1,
+        side_data_paddr,
         side_data_mat,
         side_data_access_cached,
         side_actual_mem_we,
@@ -377,7 +415,11 @@ assign {ex1_alu_result,
         inst_syscall,
         inst_ertn} = ex1_to_ex2_bus_saved;
 
+localparam TLB_OP_SRCH = 3'd1;
+localparam TLB_OP_RD   = 3'd2;
+localparam TLB_OP_WR   = 3'd3;
 localparam TLB_OP_FILL = 3'd4;
+localparam TLB_OP_INV  = 3'd5;
 
 wire is_csr     = csr_op != 2'b00;
 wire is_csrwr   = csr_op == 2'b10;
@@ -389,22 +431,22 @@ wire ex_brk     = ex_ds && (ds_ecode == `ECODE_BRK);
 wire ex_ine     = ex_ds && (ds_ecode == `ECODE_INE);
 wire ex_ipe     = side_ex_ipe && ex3_valid && !ex_ds;
 wire ex_sys     = side_ex_sys && ex3_valid && !ex_ds && !ex_ipe;
-wire ex_ale     = side_ex_ale && !ex_ds && !ex_ipe && !ex_sys;
-wire ex_data_tlb = side_ex_data_tlb && !ex_ds && !ex_ipe && !ex_sys && !ex_ale;
+wire ex_ale     = side_ex_ale && ex3_valid && !ex_ds && !ex_ipe && !ex_sys;
+wire ex_data_tlb = side_ex_data_tlb && ex3_valid &&
+                   !ex_ds && !ex_ipe && !ex_sys && !ex_ale;
 wire ex_sync    = ex_ds || ex_ipe || ex_sys || ex_ale || ex_data_tlb;
-wire ex3_has_int = inst_idle ? has_int_now : side_ex_int_pre;
+wire ex3_has_int = inst_idle ? has_int_live_r : side_ex_int_pre;
 wire ex_int     = ex3_has_int && ex3_valid && !ex_sync &&
                   !(barrier_op && !barrier_done);
 wire ex_pending = ex_sync || ex_int;
 wire ertn_pending = inst_ertn && ex3_valid && !ex_pending;
-wire sc_success = side_sc_success_pre && !ex_pending;
+wire sc_success = inst_sc_w && sc_can_store && !ex_pending;
 wire actual_mem_we = side_actual_mem_we && (!inst_sc_w || sc_success);
 wire mem_access_ok = ex3_valid && !ex_pending;
 wire es_mem_access = (res_from_mem || actual_mem_we) && mem_access_ok;
 wire privileged_state_op = csr_we_req || (tlb_op != 3'b0) ||
                            ex_pending || ertn_pending;
-wire privileged_state_ready = !privileged_state_op || older_pipe_empty ||
-                              (ex_int && !inst_idle);
+wire privileged_state_ready = !privileged_state_op || older_pipe_empty;
 wire final_operation_ready =
     inst_cacop ? (ex_pending || cacop_ok) :
     barrier_op ? (ex_pending || barrier_done) :
@@ -428,6 +470,58 @@ wire [31:0] exe_result = ds_rdcntid ? tid_sample :
 wire        tlbfill_fire = ex3_commit && !ex_pending && !ertn_pending &&
                            (tlb_op == TLB_OP_FILL);
 wire [4:0]  tlb_write_index = side_tlb_write_index;
+wire        priv_state_request = csr_we_req || (tlb_op != 3'b0);
+// A privileged operation can become ready only after MEM/WB are empty, which
+// makes ms_allowin redundant for its side-effect pulse.  Omitting that
+// redundant term prevents AXI/MEM response readiness from feeding TLB write
+// enables and, through LUTRAM write logic, the simultaneous EX2 search path.
+wire        priv_commit_valid = ex3_valid && older_pipe_empty &&
+                                priv_state_request &&
+                                !ex_pending && !ertn_pending;
+
+assign ex3_tlb_pending = ex3_valid && (tlb_op != 3'b0);
+assign priv_commit_bus = {priv_commit_valid,
+                          csr_we_req,
+                          csr_num,
+                          side_csr_wmask,
+                          side_csr_wvalue,
+                          tlb_op,
+                          side_tlb_write_index,
+                          side_tlb_w_e,
+                          side_tlb_w_vppn,
+                          side_tlb_w_ps,
+                          side_tlb_w_asid,
+                          side_tlb_w_g,
+                          side_tlb_w_ppn0,
+                          side_tlb_w_plv0,
+                          side_tlb_w_mat0,
+                          side_tlb_w_d0,
+                          side_tlb_w_v0,
+                          side_tlb_w_ppn1,
+                          side_tlb_w_plv1,
+                          side_tlb_w_mat1,
+                          side_tlb_w_d1,
+                          side_tlb_w_v1,
+                          side_s1_found,
+                          side_s1_index,
+                          side_tlbrd_e,
+                          side_tlbrd_vppn,
+                          side_tlbrd_ps,
+                          side_tlbrd_asid,
+                          side_tlbrd_g,
+                          side_tlbrd_ppn0,
+                          side_tlbrd_plv0,
+                          side_tlbrd_mat0,
+                          side_tlbrd_d0,
+                          side_tlbrd_v0,
+                          side_tlbrd_ppn1,
+                          side_tlbrd_plv1,
+                          side_tlbrd_mat1,
+                          side_tlbrd_d1,
+                          side_tlbrd_v1,
+                          invtlb_op,
+                          rkd_value[31:13],
+                          rj_value[9:0]};
 
 always @(*) begin
     if (ex_ds) begin
@@ -500,6 +594,8 @@ assign data_sram_wstrb    = actual_mem_we && mem_access_ok ? ex1_store_wstrb : 4
 assign data_sram_addr     = data_paddr;
 assign data_sram_wdata    = ex1_store_wdata;
 assign data_sram_uncached = (side_data_mat == 2'b00);
+assign sc_query_line      = data_paddr[31:4];
+assign sc_query_cached    = side_data_access_cached;
 
 assign cacop_valid     = ex3_valid && inst_cacop && !ex_pending && ms_allowin;
 assign cacop_is_dcache = (cacop_code[2:0] == 3'b001);
@@ -528,13 +624,39 @@ assign ex3_to_mem_bus = {inst_ll_w && !ex_pending && !ertn_pending,
                          es_pc};
 
 assign ex3_to_ds_dest = dest & {5{ex3_valid}} & {5{gr_we}};
+// Instructions whose GPR result is forwardable here cannot be a load, SC,
+// CACOP, barrier, IDLE, or another operation that waits in EX3.  Removing
+// final_operation_ready cuts barrier/cache handshakes out of the ID/IF
+// back-pressure cone without changing when a real producer becomes ready.
 assign ex3_to_ds_result_ready = ex3_valid && gr_we &&
-                                final_operation_ready &&
                                 !res_from_mem &&
                                 !inst_sc_w &&
                                 !ex_pending &&
                                 !ertn_pending;
 assign ex3_to_ds_result = exe_result;
+
+`ifndef SYNTHESIS
+always @(posedge clk) begin
+    if (!reset && ex3_valid &&
+        (ex3_to_ds_result_ready !==
+         (ex3_valid && gr_we && final_operation_ready && !res_from_mem &&
+          !inst_sc_w && !ex_pending && !ertn_pending)))
+        $error("EX3 fast forwarding-ready assumption violated");
+    if (!reset && priv_commit_valid &&
+        (!ex3_valid || !ex3_commit || ex_pending || ertn_pending))
+        $error("privileged side effect fired without a valid EX3 commit");
+    if (!reset && ex3_valid && priv_state_request &&
+        (priv_commit_valid !==
+         (ex3_commit && !ex_pending && !ertn_pending)))
+        $error("privileged fast commit is not equivalent to EX3 transfer");
+    if (!reset && ex3_valid && priv_state_request &&
+        (res_from_mem || es_mem_we || inst_sc_w || inst_cacop ||
+         barrier_op || inst_idle))
+        $error("privileged operation overlaps an EX3-waiting operation");
+    if (!reset && !ms_allowin && priv_commit_valid)
+        $error("privileged side effect repeated while EX3 is blocked");
+end
+`endif
 
 assign ex3_csr_we  = csr_we_req && ex3_valid;
 assign ex3_csr_num = csr_num;
@@ -544,17 +666,23 @@ assign ex3_allowin = !ex3_valid || (ex3_ready_go && ms_allowin);
 assign ex3_empty   = !ex3_valid;
 
 always @(posedge clk) begin
+    if (reset)
+        has_int_live_r <= 1'b0;
+    else
+        has_int_live_r <= has_int_now;
+
     if (reset || flush || ertn_flush || ibar_flush) begin
         ex3_valid <= 1'b0;
-        cnt_low_sample <= 32'b0;
-        cnt_high_sample <= 32'b0;
-        tid_sample <= 32'b0;
     end
     else if (ex3_allowin) begin
         ex3_valid <= ex2_to_ex3_valid;
     end
 
-    if (ex2_to_ex3_valid && ex3_allowin && !flush && !ertn_flush && !ibar_flush) begin
+    // These sampled values are meaningful only while ex3_valid is set, so
+    // resetting them adds high-fanout reset routing without architectural
+    // benefit.  The valid bit alone protects their use.
+    if (!reset && ex2_to_ex3_valid && ex3_allowin &&
+        !flush && !ertn_flush && !ibar_flush) begin
         ex2_to_ex3_bus_r <= ex2_to_ex3_bus;
         cnt_low_sample <= cnt_low_now;
         cnt_high_sample <= cnt_high_now;
@@ -570,8 +698,10 @@ module ex2_stage(
     //allowin
     input                          ex3_allowin   ,
     input                          older_pipe_empty,
+    input  [`EX3_PRIV_COMMIT_BUS_WD-1:0] priv_commit_bus,
     output                         ex2_allowin   ,
     output                         ex2_empty     ,
+    output                         ex2_tlb_pending,
     //from ex1
     input                          ex1_to_ex2_valid,
     input  [`EX1_TO_EX2_BUS_WD -1:0] ex1_to_ex2_bus,
@@ -648,6 +778,92 @@ reg         es_valid      ;
 wire        es_ready_go   ;
 
 reg  [`EX1_TO_EX2_BUS_WD -1:0] ex1_to_ex2_bus_r;
+
+wire        commit_valid;
+wire        commit_csr_we;
+wire [13:0] commit_csr_num;
+wire [31:0] commit_csr_wmask;
+wire [31:0] commit_csr_wvalue;
+wire [ 2:0] commit_tlb_op;
+wire [ 4:0] commit_tlb_write_index;
+wire        commit_tlb_w_e;
+wire [18:0] commit_tlb_w_vppn;
+wire [ 5:0] commit_tlb_w_ps;
+wire [ 9:0] commit_tlb_w_asid;
+wire        commit_tlb_w_g;
+wire [19:0] commit_tlb_w_ppn0;
+wire [ 1:0] commit_tlb_w_plv0;
+wire [ 1:0] commit_tlb_w_mat0;
+wire        commit_tlb_w_d0;
+wire        commit_tlb_w_v0;
+wire [19:0] commit_tlb_w_ppn1;
+wire [ 1:0] commit_tlb_w_plv1;
+wire [ 1:0] commit_tlb_w_mat1;
+wire        commit_tlb_w_d1;
+wire        commit_tlb_w_v1;
+wire        commit_srch_found;
+wire [ 4:0] commit_srch_index;
+wire        commit_tlbrd_e;
+wire [18:0] commit_tlbrd_vppn;
+wire [ 5:0] commit_tlbrd_ps;
+wire [ 9:0] commit_tlbrd_asid;
+wire        commit_tlbrd_g;
+wire [19:0] commit_tlbrd_ppn0;
+wire [ 1:0] commit_tlbrd_plv0;
+wire [ 1:0] commit_tlbrd_mat0;
+wire        commit_tlbrd_d0;
+wire        commit_tlbrd_v0;
+wire [19:0] commit_tlbrd_ppn1;
+wire [ 1:0] commit_tlbrd_plv1;
+wire [ 1:0] commit_tlbrd_mat1;
+wire        commit_tlbrd_d1;
+wire        commit_tlbrd_v1;
+wire [ 4:0] commit_invtlb_op;
+wire [18:0] commit_invtlb_vppn;
+wire [ 9:0] commit_invtlb_asid;
+
+assign {commit_valid,
+        commit_csr_we,
+        commit_csr_num,
+        commit_csr_wmask,
+        commit_csr_wvalue,
+        commit_tlb_op,
+        commit_tlb_write_index,
+        commit_tlb_w_e,
+        commit_tlb_w_vppn,
+        commit_tlb_w_ps,
+        commit_tlb_w_asid,
+        commit_tlb_w_g,
+        commit_tlb_w_ppn0,
+        commit_tlb_w_plv0,
+        commit_tlb_w_mat0,
+        commit_tlb_w_d0,
+        commit_tlb_w_v0,
+        commit_tlb_w_ppn1,
+        commit_tlb_w_plv1,
+        commit_tlb_w_mat1,
+        commit_tlb_w_d1,
+        commit_tlb_w_v1,
+        commit_srch_found,
+        commit_srch_index,
+        commit_tlbrd_e,
+        commit_tlbrd_vppn,
+        commit_tlbrd_ps,
+        commit_tlbrd_asid,
+        commit_tlbrd_g,
+        commit_tlbrd_ppn0,
+        commit_tlbrd_plv0,
+        commit_tlbrd_mat0,
+        commit_tlbrd_d0,
+        commit_tlbrd_v0,
+        commit_tlbrd_ppn1,
+        commit_tlbrd_plv1,
+        commit_tlbrd_mat1,
+        commit_tlbrd_d1,
+        commit_tlbrd_v1,
+        commit_invtlb_op,
+        commit_invtlb_vppn,
+        commit_invtlb_asid} = priv_commit_bus;
 
 // ============================================================
 // Unpack ds_to_es_bus
@@ -835,7 +1051,11 @@ wire        es_commit;
 
 assign es_commit    = es_valid && es_ready_go && ex3_allowin;
 assign ertn_pending = inst_ertn && es_valid && !ex_pending;
-assign csr_re       = is_csr && es_valid && !ex_pending && !ertn_pending;
+// CSR reads are side-effect free.  Keeping exception/ERTN state out of this
+// enable prevents the data-TLB exception cone from feeding the CSR read mux.
+// A killed instruction may produce a don't-care read value; EX3 suppresses
+// its architectural result and all side effects.
+assign csr_re       = is_csr && es_valid;
 assign csr_wmask  = is_csrwr ? 32'hFFFFFFFF : rj_value;
 assign csr_wvalue = rkd_value;
 assign wb_pc      = (inst_idle && ex_int) ? (es_pc + 32'd4) : es_pc;
@@ -854,7 +1074,12 @@ wire inst_tlbrd   = tlb_op == TLB_OP_RD;
 wire inst_tlbwr   = tlb_op == TLB_OP_WR;
 wire inst_tlbfill = tlb_op == TLB_OP_FILL;
 wire inst_invtlb  = tlb_op == TLB_OP_INV;
-wire tlb_commit   = es_commit && !ex_pending && !ertn_pending;
+wire tlbsrch_fire = commit_valid && (commit_tlb_op == TLB_OP_SRCH);
+wire tlbrd_fire   = commit_valid && (commit_tlb_op == TLB_OP_RD);
+wire tlbwr_fire   = commit_valid && (commit_tlb_op == TLB_OP_WR);
+wire tlbfill_fire = commit_valid && (commit_tlb_op == TLB_OP_FILL);
+wire invtlb_fire  = commit_valid && (commit_tlb_op == TLB_OP_INV);
+wire csr_write_fire = commit_valid && commit_csr_we;
 
 wire [31:0] csr_tlbidx;
 wire [31:0] csr_tlbehi;
@@ -870,9 +1095,8 @@ wire        csr_tlbidx_ne;
 
 reg  [4:0]  tlbfill_index;
 wire [4:0]  tlb_write_index = inst_tlbfill ? tlbfill_index : csr_tlbidx_index;
-wire        tlb_we          = tlb_commit && (inst_tlbwr || inst_tlbfill);
-wire        tlbfill_fire    = tlb_commit && inst_tlbfill;
-wire        invtlb_valid    = tlb_commit && inst_invtlb;
+wire        tlb_we          = tlbwr_fire || tlbfill_fire;
+wire        invtlb_valid    = invtlb_fire;
 
 wire        s0_found;
 wire [ 4:0] s0_index;
@@ -893,11 +1117,13 @@ wire        s1_d;
 wire        s1_v;
 
 wire [31:0] data_vaddr = mem_addr;
-wire [18:0] s1_vppn = inst_tlbsrch ? csr_tlbehi[31:13] :
-                       inst_invtlb  ? rkd_value[31:13]  : data_vaddr[31:13];
+wire [18:0] s1_vppn = invtlb_fire  ? commit_invtlb_vppn :
+                       inst_tlbsrch ? csr_tlbehi[31:13]   :
+                       inst_invtlb  ? rkd_value[31:13]    : data_vaddr[31:13];
 wire        s1_va_bit12 = inst_tlbsrch ? csr_tlbehi[12] :
                           inst_invtlb  ? rkd_value[12]  : data_vaddr[12];
-wire [ 9:0] s1_asid = inst_invtlb ? rj_value[9:0] : csr_asid;
+wire [ 9:0] s1_asid = invtlb_fire ? commit_invtlb_asid :
+                       inst_invtlb ? rj_value[9:0] : csr_asid;
 
 wire        tlbrd_e;
 wire [18:0] tlbrd_vppn;
@@ -940,24 +1166,24 @@ tlb #(.TLBNUM(32)) u_tlb(
     .s1_d         (s1_d),
     .s1_v         (s1_v),
     .invtlb_valid (invtlb_valid),
-    .invtlb_op    (invtlb_op),
+    .invtlb_op    (commit_invtlb_op),
     .we           (tlb_we),
-    .w_index      (tlb_write_index),
-    .w_e          (inst_tlbfill || ~csr_tlbidx_ne),
-    .w_vppn       (csr_tlbehi[31:13]),
-    .w_ps         (csr_tlbidx_ps),
-    .w_asid       (csr_asid),
-    .w_g          (csr_tlbelo0[6] & csr_tlbelo1[6]),
-    .w_ppn0       (csr_tlbelo0[27:8]),
-    .w_plv0       (csr_tlbelo0[3:2]),
-    .w_mat0       (csr_tlbelo0[5:4]),
-    .w_d0         (csr_tlbelo0[1]),
-    .w_v0         (csr_tlbelo0[0]),
-    .w_ppn1       (csr_tlbelo1[27:8]),
-    .w_plv1       (csr_tlbelo1[3:2]),
-    .w_mat1       (csr_tlbelo1[5:4]),
-    .w_d1         (csr_tlbelo1[1]),
-    .w_v1         (csr_tlbelo1[0]),
+    .w_index      (commit_tlb_write_index),
+    .w_e          (commit_tlb_w_e),
+    .w_vppn       (commit_tlb_w_vppn),
+    .w_ps         (commit_tlb_w_ps),
+    .w_asid       (commit_tlb_w_asid),
+    .w_g          (commit_tlb_w_g),
+    .w_ppn0       (commit_tlb_w_ppn0),
+    .w_plv0       (commit_tlb_w_plv0),
+    .w_mat0       (commit_tlb_w_mat0),
+    .w_d0         (commit_tlb_w_d0),
+    .w_v0         (commit_tlb_w_v0),
+    .w_ppn1       (commit_tlb_w_ppn1),
+    .w_plv1       (commit_tlb_w_plv1),
+    .w_mat1       (commit_tlb_w_mat1),
+    .w_d1         (commit_tlb_w_d1),
+    .w_v1         (commit_tlb_w_v1),
     .r_index      (csr_tlbidx_index),
     .r_e          (tlbrd_e),
     .r_vppn       (tlbrd_vppn),
@@ -991,9 +1217,10 @@ csr_regfile u_csr_regfile(
     .csr_re     (csr_re     ),
     .csr_num    (csr_num    ),
     .csr_rvalue (csr_rvalue ),
-    .csr_we     (csr_we_req && es_commit && !ex_pending && !ertn_pending),
-    .csr_wmask  (csr_wmask  ),
-    .csr_wvalue (csr_wvalue ),
+    .csr_we     (csr_write_fire),
+    .csr_wnum   (commit_csr_num),
+    .csr_wmask  (commit_csr_wmask),
+    .csr_wvalue (commit_csr_wvalue),
     .wb_ex      (ex3_wb_ex       ),
     .wb_ecode   (ex3_wb_ecode    ),
     .wb_esubcode(ex3_wb_esubcode ),
@@ -1021,25 +1248,25 @@ csr_regfile u_csr_regfile(
     .csr_tlbidx_index(csr_tlbidx_index),
     .csr_tlbidx_ps(csr_tlbidx_ps),
     .csr_tlbidx_ne(csr_tlbidx_ne),
-    .tlbsrch_en (tlb_commit && inst_tlbsrch),
-    .tlbsrch_found(s1_found),
-    .tlbsrch_index(s1_index),
-    .tlbrd_en   (tlb_commit && inst_tlbrd),
-    .tlbrd_e    (tlbrd_e),
-    .tlbrd_vppn (tlbrd_vppn),
-    .tlbrd_ps   (tlbrd_ps),
-    .tlbrd_asid (tlbrd_asid),
-    .tlbrd_g    (tlbrd_g),
-    .tlbrd_ppn0 (tlbrd_ppn0),
-    .tlbrd_plv0 (tlbrd_plv0),
-    .tlbrd_mat0 (tlbrd_mat0),
-    .tlbrd_d0   (tlbrd_d0),
-    .tlbrd_v0   (tlbrd_v0),
-    .tlbrd_ppn1 (tlbrd_ppn1),
-    .tlbrd_plv1 (tlbrd_plv1),
-    .tlbrd_mat1 (tlbrd_mat1),
-    .tlbrd_d1   (tlbrd_d1),
-    .tlbrd_v1   (tlbrd_v1)
+    .tlbsrch_en (tlbsrch_fire),
+    .tlbsrch_found(commit_srch_found),
+    .tlbsrch_index(commit_srch_index),
+    .tlbrd_en   (tlbrd_fire),
+    .tlbrd_e    (commit_tlbrd_e),
+    .tlbrd_vppn (commit_tlbrd_vppn),
+    .tlbrd_ps   (commit_tlbrd_ps),
+    .tlbrd_asid (commit_tlbrd_asid),
+    .tlbrd_g    (commit_tlbrd_g),
+    .tlbrd_ppn0 (commit_tlbrd_ppn0),
+    .tlbrd_plv0 (commit_tlbrd_plv0),
+    .tlbrd_mat0 (commit_tlbrd_mat0),
+    .tlbrd_d0   (commit_tlbrd_d0),
+    .tlbrd_v0   (commit_tlbrd_v0),
+    .tlbrd_ppn1 (commit_tlbrd_ppn1),
+    .tlbrd_plv1 (commit_tlbrd_plv1),
+    .tlbrd_mat1 (commit_tlbrd_mat1),
+    .tlbrd_d1   (commit_tlbrd_d1),
+    .tlbrd_v1   (commit_tlbrd_v1)
 );
 
 // CSR hazard tracking for ID stage
@@ -1177,9 +1404,8 @@ assign wb_ex = es_commit && ex_pending;
 
 wire sc_success = inst_sc_w && sc_can_store && !ex_pending;
 wire actual_mem_we = es_mem_we && (!inst_sc_w || sc_success);
-wire privileged_state_op = csr_we_req || (tlb_op != 3'b0) ||
-                           ex_pending || ertn_pending;
-wire privileged_state_ready = !privileged_state_op || older_pipe_empty;
+// EX2 is now a pure calculation stage.  Architectural serialization and all
+// CSR/TLB side effects occur at EX3 commit.
 
 // ============================================================
 // Exception info for CSR
@@ -1246,7 +1472,7 @@ assign rdcntv_result = ds_rdcntv_hi ? cnt_high : cnt_low;
 // Use always_comb to prevent X propagation in result mux
 // (if-else treats X conditions as false, vs ?: which merges both branches)
 reg [31:0] exe_result;
-wire       exe_csr_sel = is_csr && !wb_ex && !ertn_flush;
+wire       exe_csr_sel = is_csr;
 always @(*) begin
     if (ds_rdcntid === 1'b1)
         exe_result = tid_val;
@@ -1307,10 +1533,22 @@ assign idle_wait       = es_valid && inst_idle && !wb_ex;
 wire es_operation_ready = div_op ? div_done :
                           mul_op ? mul_done :
                                    1'b1;
-assign es_ready_go    = es_operation_ready && privileged_state_ready;
+assign es_ready_go    = es_operation_ready;
 assign ex2_allowin    = !es_valid || es_ready_go && ex3_allowin;
 assign ex2_empty      = !es_valid;
 assign ex2_to_ex3_valid = es_valid && es_ready_go;
+
+`ifndef SYNTHESIS
+// Keep the decode assumptions behind the fast commit path executable in RTL
+// simulation.  The equivalence check also catches any future instruction-class
+// overlap that introduces a new cancellation condition.
+always @(posedge clk) begin
+    if (!reset && es_valid && (tlb_op != 3'b0) && data_mem_op)
+        $error("TLB instruction decoded as a data-memory operation");
+    if (!reset && es_valid && csr_we_req && data_mem_op)
+        $error("CSR write decoded as a data-memory operation");
+end
+`endif
 
 always @(posedge clk) begin
     if (reset) begin
@@ -1331,18 +1569,37 @@ end
 // ============================================================
 // Bus output
 // ============================================================
-assign ex2_to_ex3_bus = {data_paddr,
+wire side_ipe_candidate = privileged_inst && (csr_plv != 2'b00);
+wire side_ale_candidate = (ale_w && (data_vaddr[1:0] != 2'b00)) ||
+                          (ale_h && (data_vaddr[0] != 1'b0));
+
+assign ex2_to_ex3_bus = {inst_tlbfill || ~csr_tlbidx_ne,
+                          csr_tlbehi[31:13],
+                          csr_tlbidx_ps,
+                          csr_asid,
+                          csr_tlbelo0[6] & csr_tlbelo1[6],
+                          csr_tlbelo0[27:8],
+                          csr_tlbelo0[3:2],
+                          csr_tlbelo0[5:4],
+                          csr_tlbelo0[1],
+                          csr_tlbelo0[0],
+                          csr_tlbelo1[27:8],
+                          csr_tlbelo1[3:2],
+                          csr_tlbelo1[5:4],
+                          csr_tlbelo1[1],
+                          csr_tlbelo1[0],
+                          data_paddr,
                          data_mat,
                          data_access_cached,
-                         actual_mem_we,
-                         sc_success,
-                         exe_result,
-                         ex_ipe,
-                         ex_sys,
-                         ex_ale,
-                         ex_data_tlb,
-                         data_tlb_ecode,
-                         wb_pc,
+                          es_mem_we,
+                          sc_can_store,
+                          exe_result,
+                          side_ipe_candidate,
+                          inst_syscall,
+                          side_ale_candidate,
+                          data_tlb_ex,
+                          data_tlb_ecode,
+                          es_pc,
                          csr_rvalue,
                          csr_wmask,
                          csr_wvalue,
@@ -1363,9 +1620,11 @@ assign ex2_to_ex3_bus = {data_paddr,
                          tlbrd_mat1,
                          tlbrd_d1,
                          tlbrd_v1,
-                         ex_int,
+                          has_int,
                          tlb_write_index,
-                         ex1_to_ex2_bus_r};
+                          ex1_to_ex2_bus_r};
+
+assign ex2_tlb_pending = es_valid && (tlb_op != 3'b0);
 
 // ============================================================
 // Forward to ID

@@ -44,6 +44,9 @@ module id_stage(
     input        ex3_csr_we,
     input [13:0] ex3_csr_num,
     input        ex3_is_ertn,
+    input        ex1_tlb_pending,
+    input        ex2_tlb_pending,
+    input        ex3_tlb_pending,
     // ertn flush
     input        ertn_flush
 );
@@ -681,10 +684,13 @@ wire id_needs_int_csr  = 1'b1;
 wire id_needs_ertn_csr = inst_ertn;
 
 wire csr_stall;
+// CSR/TLB state is committed in EX3.  Keep every younger instruction behind
+// a pending state-changing operation so address translation, interrupts, and
+// back-to-back TLB snapshots observe a single architectural state.
 assign csr_stall = ds_valid && (
-    (id_needs_int_csr  && (ex1_writes_int_csr || ex2_writes_int_csr || ex3_writes_int_csr))   ||
-    (id_needs_ertn_csr && (ex1_writes_ertn_csr || ex2_writes_ertn_csr || ex3_writes_ertn_csr)) ||
-    (id_needs_int_csr  && (ex1_is_ertn || ex2_is_ertn || ex3_is_ertn))
+    ex1_csr_we || ex2_csr_we || ex3_csr_we ||
+    ex1_is_ertn || ex2_is_ertn || ex3_is_ertn ||
+    ex1_tlb_pending || ex2_tlb_pending || ex3_tlb_pending
 );
 
 // ============================================================
