@@ -440,6 +440,15 @@ wire ex_int     = ex3_has_int && ex3_valid && !ex_sync &&
                   !(barrier_op && !barrier_done);
 wire ex_pending = ex_sync || ex_int;
 wire ertn_pending = inst_ertn && ex3_valid && !ex_pending;
+// CSR/TLB instructions cannot be barriers, memory operations, SYSCALL, or
+// ERTN.  Their only applicable cancellation causes are an older decoded
+// exception, privilege violation, or the sampled interrupt.  Keeping this
+// kill cone separate prevents barrier_done and the data-TLB result from
+// feeding the TLB/CSR side-effect enables.
+wire priv_privilege_kill = side_ex_ipe && ex3_valid;
+wire priv_interrupt = side_ex_int_pre && ex3_valid &&
+                      !priv_privilege_kill;
+wire priv_fast_kill = priv_privilege_kill || priv_interrupt;
 wire sc_success = inst_sc_w && sc_can_store && !ex_pending;
 wire actual_mem_we = side_actual_mem_we && (!inst_sc_w || sc_success);
 wire mem_access_ok = ex3_valid && !ex_pending;
@@ -477,7 +486,7 @@ wire        priv_state_request = csr_we_req || (tlb_op != 3'b0);
 // enables and, through LUTRAM write logic, the simultaneous EX2 search path.
 wire        priv_commit_valid = ex3_valid && older_pipe_empty &&
                                 priv_state_request &&
-                                !ex_pending && !ertn_pending;
+                                !priv_fast_kill;
 
 assign ex3_tlb_pending = ex3_valid && (tlb_op != 3'b0);
 assign priv_commit_bus = {priv_commit_valid,
@@ -653,6 +662,8 @@ always @(posedge clk) begin
         (res_from_mem || es_mem_we || inst_sc_w || inst_cacop ||
          barrier_op || inst_idle))
         $error("privileged operation overlaps an EX3-waiting operation");
+    if (!reset && ex3_valid && priv_state_request && ex_ds)
+        $error("privileged operation was not sanitized after an ID exception");
     if (!reset && !ms_allowin && priv_commit_valid)
         $error("privileged side effect repeated while EX3 is blocked");
 end
@@ -778,8 +789,11 @@ reg         es_valid      ;
 wire        es_ready_go   ;
 
 reg  [`EX1_TO_EX2_BUS_WD -1:0] ex1_to_ex2_bus_r;
+reg  [`EX3_PRIV_COMMIT_BUS_WD-1:0] priv_commit_bus_r;
+reg         priv_apply_pending;
 
-wire        commit_valid;
+wire        commit_payload_valid;
+wire        commit_valid = priv_apply_pending && commit_payload_valid;
 wire        commit_csr_we;
 wire [13:0] commit_csr_num;
 wire [31:0] commit_csr_wmask;
@@ -822,7 +836,7 @@ wire [ 4:0] commit_invtlb_op;
 wire [18:0] commit_invtlb_vppn;
 wire [ 9:0] commit_invtlb_asid;
 
-assign {commit_valid,
+assign {commit_payload_valid,
         commit_csr_we,
         commit_csr_num,
         commit_csr_wmask,
@@ -863,7 +877,25 @@ assign {commit_valid,
         commit_tlbrd_v1,
         commit_invtlb_op,
         commit_invtlb_vppn,
-        commit_invtlb_asid} = priv_commit_bus;
+        commit_invtlb_asid} = priv_commit_bus_r;
+
+wire incoming_priv_commit = priv_commit_bus[`EX3_PRIV_COMMIT_BUS_WD-1];
+
+// Register the EX3 commit payload before applying it to the shared CSR/TLB.
+// ID remains stalled by priv_apply_pending, so no younger instruction can
+// observe the one-cycle-delayed architectural state update.
+always @(posedge clk) begin
+    if (reset) begin
+        priv_apply_pending <= 1'b0;
+    end
+    else if (priv_apply_pending) begin
+        priv_apply_pending <= 1'b0;
+    end
+    else if (incoming_priv_commit) begin
+        priv_apply_pending <= 1'b1;
+        priv_commit_bus_r  <= priv_commit_bus;
+    end
+end
 
 // ============================================================
 // Unpack ds_to_es_bus
@@ -1624,7 +1656,8 @@ assign ex2_to_ex3_bus = {inst_tlbfill || ~csr_tlbidx_ne,
                          tlb_write_index,
                           ex1_to_ex2_bus_r};
 
-assign ex2_tlb_pending = es_valid && (tlb_op != 3'b0);
+assign ex2_tlb_pending = (es_valid && (tlb_op != 3'b0)) ||
+                         priv_apply_pending;
 
 // ============================================================
 // Forward to ID

@@ -157,74 +157,135 @@ endfunction
 
 wire [TLBNUM-1:0] s0_match_vec;
 wire [TLBNUM-1:0] s1_match_vec;
-wire              s0_found_w;
-wire              s1_found_w;
-wire [$clog2(TLBNUM)-1:0] s0_index_w;
-wire [$clog2(TLBNUM)-1:0] s1_index_w;
-wire              s0_odd_w;
-wire              s1_odd_w;
+localparam BANK_NUM  = 4;
+localparam BANK_SIZE = TLBNUM / BANK_NUM;
+localparam INDEX_W   = $clog2(TLBNUM);
 
-genvar match_i;
+genvar bank_g;
+genvar entry_g;
 generate
-    for (match_i = 0; match_i < TLBNUM; match_i = match_i + 1) begin : gen_match
-        assign s0_match_vec[match_i] =
-            tlb_e[match_i] &&
-            (tlb_g[match_i] || (tlb_asid[match_i] == s0_asid)) &&
-            vppn_match(s0_vppn, tlb_vppn[match_i], tlb_ps[match_i]);
-        assign s1_match_vec[match_i] =
-            tlb_e[match_i] &&
-            (tlb_g[match_i] || (tlb_asid[match_i] == s1_asid)) &&
-            vppn_match(s1_vppn, tlb_vppn[match_i], tlb_ps[match_i]);
+    for (bank_g = 0; bank_g < BANK_NUM; bank_g = bank_g + 1) begin : gen_match_bank
+        for (entry_g = 0; entry_g < BANK_SIZE; entry_g = entry_g + 1) begin : gen_match_entry
+            assign s0_match_vec[bank_g*BANK_SIZE+entry_g] =
+                tlb_e[bank_g*BANK_SIZE+entry_g] &&
+                (tlb_g[bank_g*BANK_SIZE+entry_g] ||
+                 (tlb_asid[bank_g*BANK_SIZE+entry_g] == s0_asid)) &&
+                vppn_match(s0_vppn, tlb_vppn[bank_g*BANK_SIZE+entry_g],
+                           tlb_ps[bank_g*BANK_SIZE+entry_g]);
+            assign s1_match_vec[bank_g*BANK_SIZE+entry_g] =
+                tlb_e[bank_g*BANK_SIZE+entry_g] &&
+                (tlb_g[bank_g*BANK_SIZE+entry_g] ||
+                 (tlb_asid[bank_g*BANK_SIZE+entry_g] == s1_asid)) &&
+                vppn_match(s1_vppn, tlb_vppn[bank_g*BANK_SIZE+entry_g],
+                           tlb_ps[bank_g*BANK_SIZE+entry_g]);
+        end
     end
 endgenerate
 
-assign s0_found_w = |s0_match_vec;
-assign s1_found_w = |s1_match_vec;
+reg                 s0_bank_found [0:BANK_NUM-1];
+reg [INDEX_W-1:0]   s0_bank_index [0:BANK_NUM-1];
+reg [ 5:0]          s0_bank_ps    [0:BANK_NUM-1];
+reg [19:0]          s0_bank_ppn   [0:BANK_NUM-1];
+reg [ 1:0]          s0_bank_plv   [0:BANK_NUM-1];
+reg [ 1:0]          s0_bank_mat   [0:BANK_NUM-1];
+reg                 s0_bank_d     [0:BANK_NUM-1];
+reg                 s0_bank_v     [0:BANK_NUM-1];
+reg                 s1_bank_found [0:BANK_NUM-1];
+reg [INDEX_W-1:0]   s1_bank_index [0:BANK_NUM-1];
+reg [ 5:0]          s1_bank_ps    [0:BANK_NUM-1];
+reg [19:0]          s1_bank_ppn   [0:BANK_NUM-1];
+reg [ 1:0]          s1_bank_plv   [0:BANK_NUM-1];
+reg [ 1:0]          s1_bank_mat   [0:BANK_NUM-1];
+reg                 s1_bank_d     [0:BANK_NUM-1];
+reg                 s1_bank_v     [0:BANK_NUM-1];
 
-function [$clog2(TLBNUM)-1:0] first_match_index;
-    input [TLBNUM-1:0] match_vec;
-    integer pe_i;
-    begin
-        first_match_index = {$clog2(TLBNUM){1'b0}};
-        for (pe_i = TLBNUM - 1; pe_i >= 0; pe_i = pe_i - 1) begin
-            if (match_vec[pe_i]) begin
-                first_match_index = pe_i[$clog2(TLBNUM)-1:0];
+integer sel_bank;
+integer sel_entry;
+integer sel_index;
+reg     sel_odd;
+always @(*) begin
+    for (sel_bank = 0; sel_bank < BANK_NUM; sel_bank = sel_bank + 1) begin
+        s0_bank_found[sel_bank] = 1'b0;
+        s0_bank_index[sel_bank] = {INDEX_W{1'b0}};
+        s0_bank_ps   [sel_bank] = 6'b0;
+        s0_bank_ppn  [sel_bank] = 20'b0;
+        s0_bank_plv  [sel_bank] = 2'b0;
+        s0_bank_mat  [sel_bank] = 2'b0;
+        s0_bank_d    [sel_bank] = 1'b0;
+        s0_bank_v    [sel_bank] = 1'b0;
+        s1_bank_found[sel_bank] = 1'b0;
+        s1_bank_index[sel_bank] = {INDEX_W{1'b0}};
+        s1_bank_ps   [sel_bank] = 6'b0;
+        s1_bank_ppn  [sel_bank] = 20'b0;
+        s1_bank_plv  [sel_bank] = 2'b0;
+        s1_bank_mat  [sel_bank] = 2'b0;
+        s1_bank_d    [sel_bank] = 1'b0;
+        s1_bank_v    [sel_bank] = 1'b0;
+        for (sel_entry = BANK_SIZE-1; sel_entry >= 0; sel_entry = sel_entry-1) begin
+            sel_index = sel_bank*BANK_SIZE + sel_entry;
+            if (s0_match_vec[sel_index]) begin
+                sel_odd = odd_page(s0_vppn, s0_va_bit12, tlb_ps[sel_index]);
+                s0_bank_found[sel_bank] = 1'b1;
+                s0_bank_index[sel_bank] = sel_index[INDEX_W-1:0];
+                s0_bank_ps   [sel_bank] = tlb_ps[sel_index];
+                s0_bank_ppn  [sel_bank] = sel_odd ? tlb_ppn1[sel_index] : tlb_ppn0[sel_index];
+                s0_bank_plv  [sel_bank] = sel_odd ? tlb_plv1[sel_index] : tlb_plv0[sel_index];
+                s0_bank_mat  [sel_bank] = sel_odd ? tlb_mat1[sel_index] : tlb_mat0[sel_index];
+                s0_bank_d    [sel_bank] = sel_odd ? tlb_d1[sel_index]   : tlb_d0[sel_index];
+                s0_bank_v    [sel_bank] = sel_odd ? tlb_v1[sel_index]   : tlb_v0[sel_index];
+            end
+            if (s1_match_vec[sel_index]) begin
+                sel_odd = odd_page(s1_vppn, s1_va_bit12, tlb_ps[sel_index]);
+                s1_bank_found[sel_bank] = 1'b1;
+                s1_bank_index[sel_bank] = sel_index[INDEX_W-1:0];
+                s1_bank_ps   [sel_bank] = tlb_ps[sel_index];
+                s1_bank_ppn  [sel_bank] = sel_odd ? tlb_ppn1[sel_index] : tlb_ppn0[sel_index];
+                s1_bank_plv  [sel_bank] = sel_odd ? tlb_plv1[sel_index] : tlb_plv0[sel_index];
+                s1_bank_mat  [sel_bank] = sel_odd ? tlb_mat1[sel_index] : tlb_mat0[sel_index];
+                s1_bank_d    [sel_bank] = sel_odd ? tlb_d1[sel_index]   : tlb_d0[sel_index];
+                s1_bank_v    [sel_bank] = sel_odd ? tlb_v1[sel_index]   : tlb_v0[sel_index];
             end
         end
     end
-endfunction
 
-assign s0_index_w = first_match_index(s0_match_vec);
-assign s1_index_w = first_match_index(s1_match_vec);
-assign s0_odd_w   = odd_page(s0_vppn, s0_va_bit12, tlb_ps[s0_index_w]);
-assign s1_odd_w   = odd_page(s1_vppn, s1_va_bit12, tlb_ps[s1_index_w]);
-
-always @(*) begin
-    s0_found = s0_found_w;
-    s0_index = s0_index_w;
-    s0_ps    = s0_found_w ? tlb_ps[s0_index_w] : 6'b0;
-    s0_ppn   = !s0_found_w ? 20'b0 :
-               s0_odd_w    ? tlb_ppn1[s0_index_w] : tlb_ppn0[s0_index_w];
-    s0_plv   = !s0_found_w ? 2'b0 :
-               s0_odd_w    ? tlb_plv1[s0_index_w] : tlb_plv0[s0_index_w];
-    s0_mat   = !s0_found_w ? 2'b0 :
-               s0_odd_w    ? tlb_mat1[s0_index_w] : tlb_mat0[s0_index_w];
-    s0_d     = s0_found_w && (s0_odd_w ? tlb_d1[s0_index_w] : tlb_d0[s0_index_w]);
-    s0_v     = s0_found_w && (s0_odd_w ? tlb_v1[s0_index_w] : tlb_v0[s0_index_w]);
-end
-
-always @(*) begin
-    s1_found = s1_found_w;
-    s1_index = s1_index_w;
-    s1_ps    = s1_found_w ? tlb_ps[s1_index_w] : 6'b0;
-    s1_ppn   = !s1_found_w ? 20'b0 :
-               s1_odd_w    ? tlb_ppn1[s1_index_w] : tlb_ppn0[s1_index_w];
-    s1_plv   = !s1_found_w ? 2'b0 :
-               s1_odd_w    ? tlb_plv1[s1_index_w] : tlb_plv0[s1_index_w];
-    s1_mat   = !s1_found_w ? 2'b0 :
-               s1_odd_w    ? tlb_mat1[s1_index_w] : tlb_mat0[s1_index_w];
-    s1_d     = s1_found_w && (s1_odd_w ? tlb_d1[s1_index_w] : tlb_d0[s1_index_w]);
-    s1_v     = s1_found_w && (s1_odd_w ? tlb_v1[s1_index_w] : tlb_v0[s1_index_w]);
+    s0_found = 1'b0;
+    s0_index = {INDEX_W{1'b0}};
+    s0_ps    = 6'b0;
+    s0_ppn   = 20'b0;
+    s0_plv   = 2'b0;
+    s0_mat   = 2'b0;
+    s0_d     = 1'b0;
+    s0_v     = 1'b0;
+    s1_found = 1'b0;
+    s1_index = {INDEX_W{1'b0}};
+    s1_ps    = 6'b0;
+    s1_ppn   = 20'b0;
+    s1_plv   = 2'b0;
+    s1_mat   = 2'b0;
+    s1_d     = 1'b0;
+    s1_v     = 1'b0;
+    for (sel_bank = BANK_NUM-1; sel_bank >= 0; sel_bank = sel_bank-1) begin
+        if (s0_bank_found[sel_bank]) begin
+            s0_found = 1'b1;
+            s0_index = s0_bank_index[sel_bank];
+            s0_ps    = s0_bank_ps   [sel_bank];
+            s0_ppn   = s0_bank_ppn  [sel_bank];
+            s0_plv   = s0_bank_plv  [sel_bank];
+            s0_mat   = s0_bank_mat  [sel_bank];
+            s0_d     = s0_bank_d    [sel_bank];
+            s0_v     = s0_bank_v    [sel_bank];
+        end
+        if (s1_bank_found[sel_bank]) begin
+            s1_found = 1'b1;
+            s1_index = s1_bank_index[sel_bank];
+            s1_ps    = s1_bank_ps   [sel_bank];
+            s1_ppn   = s1_bank_ppn  [sel_bank];
+            s1_plv   = s1_bank_plv  [sel_bank];
+            s1_mat   = s1_bank_mat  [sel_bank];
+            s1_d     = s1_bank_d    [sel_bank];
+            s1_v     = s1_bank_v    [sel_bank];
+        end
+    end
 end
 
 integer inv_i;

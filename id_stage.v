@@ -735,6 +735,14 @@ assign {rf_we   ,  //37:37
 //           tlb_op, invtlb_op, inst_cacop, cacop_code,
 //           original 180-bit fields}
 // ============================================================
+// Once ID already carries an exception, the instruction bits are no longer
+// architecturally executable.  Sanitize privileged opcodes at the issue
+// boundary so downstream commit logic does not need ds_ex in its side-effect
+// kill cone.
+wire [2:0] issue_tlb_op = ds_ex ? 3'b0 : tlb_op;
+wire [1:0] issue_csr_op = ds_ex ? 2'b0 : csr_op;
+wire       issue_ertn   = ds_ex ? 1'b0 : inst_ertn;
+
 assign ds_to_es_bus = {ds_ex,
                        ds_ecode,
                        ds_esubcode,
@@ -747,7 +755,7 @@ assign ds_to_es_bus = {ds_ex,
                        inst_rdcntv,
                        inst_rdcntvh_w,
                        inst_rdcntid,
-                       tlb_op,
+                       issue_tlb_op,
                        invtlb_op,
                        inst_cacop,
                        cacop_code,
@@ -767,10 +775,10 @@ assign ds_to_es_bus = {ds_ex,
                        rkd_value    ,
                        ds_pc        ,
                        res_from_mem ,
-                       csr_op       ,
+                       issue_csr_op ,
                        csr_num      ,
                        inst_syscall ,
-                       inst_ertn
+                       issue_ertn
                       };
 
 // ============================================================

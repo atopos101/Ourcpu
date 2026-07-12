@@ -1285,6 +1285,14 @@ wire       diff_reservation_valid_after_mem =
            ll_commit_valid               ? 1'b1 :
            u_llsc_unit.reservation_clear ? 1'b0 :
                                            reservation_valid;
+// The privileged-state write and the difftest snapshot retire on the same
+// edge.  Include an LLBCTL write in the value reported for that instruction;
+// sampling llbctl_klo alone would expose the pre-commit value for one cycle.
+wire       diff_llbctl_klo_after_mem =
+           ex2_stage.csr_write_fire &&
+           (ex2_stage.commit_csr_num == 14'h60) &&
+           ex2_stage.commit_csr_wmask[2] ? ex2_stage.commit_csr_wvalue[2] :
+                                           llbctl_klo;
 
 always @(posedge clk) begin
     if (reset) begin
@@ -1395,7 +1403,7 @@ always @(posedge clk) begin
             diff_ws_timer         <= diff_ms_timer;
             diff_ws_csr_rstat     <= diff_ms_csr_rstat;
             diff_ws_csr_data      <= diff_ms_csr_data;
-            diff_ws_llbctl        <= {llbctl_klo, 1'b0,
+            diff_ws_llbctl        <= {diff_llbctl_klo_after_mem, 1'b0,
                                       diff_reservation_valid_after_mem};
         end
         else if (ws_allowin) begin
