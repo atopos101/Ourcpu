@@ -690,6 +690,24 @@ wire [`MS_TO_WS_BUS_WD -1:0] ms_to_ws_bus;
 wire [`WS_TO_RF_BUS_WD -1:0] ws_to_rf_bus;
 wire [`BR_BUS_WD       -1:0] br_bus;
 
+// Target-architecture decoupling boundaries.
+wire         f2_to_fetch_queue_valid;
+wire         fetch_queue_to_decode_valid;
+wire         fetch_queue_in_ready;
+wire [`FS_TO_DS_BUS_WD-1:0] f2_to_fetch_queue_bus;
+wire [`FS_TO_DS_BUS_WD-1:0] fetch_queue_to_decode_bus;
+wire [2:0]   fetch_queue_occupancy;
+wire         decode_to_issue_valid;
+wire         issue_decode_ready;
+wire [`ID_TO_EX1_BUS_WD-1:0] decode_to_issue_bus;
+wire         issue_lane0_valid;
+wire [`ID_TO_EX1_BUS_WD-1:0] issue_lane0_bus;
+wire [4:0]   issue_to_ds_dest;
+wire         issue_csr_we;
+wire [13:0]  issue_csr_num;
+wire         issue_is_ertn;
+wire         issue_tlb_pending;
+
 // Seven-stage migration aliases. Phase 1 keeps the existing five-stage
 // modules connected while making the new stage boundaries visible.
 wire         if1_allowin;
@@ -718,15 +736,17 @@ wire [`EX3_TO_MEM_BUS_WD -1:0] ex3_to_mem_bus;
 
 assign if1_allowin      = if2_allowin;
 assign id_allowin       = ds_allowin;
-assign es_allowin       = ex1_allowin;
+assign es_allowin       = issue_decode_ready;
 assign mem_allowin      = ms_allowin;
 assign wb_allowin       = ws_allowin;
-assign if2_to_id_valid  = fs_to_ds_valid;
-assign id_to_ex1_valid  = ds_to_es_valid;
+assign if2_to_id_valid  = fetch_queue_to_decode_valid;
+// A JIRL resolves in EX1.  The sequential instruction may already be waiting
+// in Issue at that point; do not let it enter EX1 on the redirect edge.
+assign id_to_ex1_valid  = issue_lane0_valid && !ex1_redirect_valid;
 assign es_to_ms_valid   = ex3_to_mem_valid;
 assign mem_to_wb_valid  = ms_to_ws_valid;
-assign if2_to_id_bus    = fs_to_ds_bus;
-assign id_to_ex1_bus    = ds_to_es_bus;
+assign if2_to_id_bus    = fetch_queue_to_decode_bus;
+assign id_to_ex1_bus    = issue_lane0_bus;
 assign es_to_ms_bus     = ex3_to_mem_bus;
 
 wire [4:0] ex1_to_ds_dest;
@@ -771,15 +791,19 @@ wire        idle_wait;
 wire        br_stall;
 wire        br_taken;
 wire [31:0] br_target;
+wire        ex1_redirect_valid;
+wire [31:0] ex1_redirect_target;
 wire        redirect_valid;
 wire [31:0] redirect_pc;
 wire [ 1:0] redirect_cause;
 
 assign {br_stall, br_taken, br_target} = br_bus;
-assign redirect_valid = ertn_flush || flush || ibar_flush || br_taken;
+assign redirect_valid = ertn_flush || flush || ibar_flush ||
+                        ex1_redirect_valid || br_taken;
 assign redirect_pc    = ertn_flush ? ertn_pc     :
                         flush      ? ex_entry    :
                         ibar_flush ? ibar_target :
+                        ex1_redirect_valid ? ex1_redirect_target :
                                      br_target;
 assign redirect_cause = ertn_flush ? `REDIRECT_CAUSE_ERTN :
                         flush      ? `REDIRECT_CAUSE_EXCP :
@@ -852,7 +876,8 @@ llsc_unit u_llsc_unit(
     .reservation_valid       (reservation_valid       )
 );
 
-// IF1 stage: PC selection, request issue, and redirect cancellation.
+// F0/F1: next-PC selection followed by the registered translation/request
+// descriptor boundary implemented inside if1_stage.
 if1_stage if1_stage(
     .clk                 (clk                 ),
     .reset               (reset               ),
@@ -877,20 +902,37 @@ if1_stage if1_stage(
     .inst_sram_addr_ok   (inst_sram_addr_ok   )
 );
 
-// IF2 stage: response wait/filtering and instruction packing for ID.
+// F2: ICache response wait/filtering.  Its ready input terminates at the
+// Fetch Queue rather than propagating Decode backpressure into the cache.
 if2_stage if2_stage(
     .clk                 (clk                 ),
     .reset               (reset               ),
-    .ds_allowin          (ds_allowin          ),
+    .ds_allowin          (fetch_queue_in_ready),
     .if2_allowin         (if2_allowin         ),
     .redirect            (redirect_valid      ),
     .if1_to_if2_valid    (if1_to_if2_valid    ),
     .if1_to_if2_bus      (if1_to_if2_bus      ),
-    .fs_to_ds_valid      (fs_to_ds_valid      ),
-    .fs_to_ds_bus        (fs_to_ds_bus        ),
+    .fs_to_ds_valid      (f2_to_fetch_queue_valid),
+    .fs_to_ds_bus        (f2_to_fetch_queue_bus),
     .inst_sram_data_ok   (inst_sram_data_ok   ),
     .inst_sram_rdata     (inst_sram_rdata     )
 );
+
+fetch_queue #(.DEPTH(4), .PTR_W(2)) u_fetch_queue(
+    .clk          (clk                         ),
+    .reset        (reset                       ),
+    .flush        (redirect_valid              ),
+    .in_valid     (f2_to_fetch_queue_valid     ),
+    .in_ready     (fetch_queue_in_ready        ),
+    .in_packet    (f2_to_fetch_queue_bus       ),
+    .out_valid    (fetch_queue_to_decode_valid ),
+    .out_ready    (ds_allowin                  ),
+    .out_packet   (fetch_queue_to_decode_bus   ),
+    .occupancy    (fetch_queue_occupancy       )
+);
+
+assign fs_to_ds_valid = fetch_queue_to_decode_valid;
+assign fs_to_ds_bus   = fetch_queue_to_decode_bus;
 
 // ID stage
 id_stage id_stage(
@@ -898,6 +940,7 @@ id_stage id_stage(
     .reset          (reset          ),
     .flush          (flush          ),
     .ibar_flush     (ibar_flush     ),
+    .ex1_redirect   (ex1_redirect_valid),
     //allowin
     .es_allowin     (es_allowin     ),
     .ds_allowin     (ds_allowin     ),
@@ -911,6 +954,11 @@ id_stage id_stage(
     .br_bus         (br_bus         ),
     //to rf: for write back
     .ws_to_rf_bus   (ws_to_rf_bus   ),
+    .issue_to_ds_dest(issue_to_ds_dest),
+    .issue_csr_we   (issue_csr_we   ),
+    .issue_csr_num  (issue_csr_num  ),
+    .issue_is_ertn  (issue_is_ertn  ),
+    .issue_tlb_pending(issue_tlb_pending),
     //hazard detect info
     .ex1_to_ds_dest (ex1_to_ds_dest ),
     .ex2_to_ds_dest (ex2_to_ds_dest ),
@@ -943,6 +991,27 @@ id_stage id_stage(
     .ertn_flush     (ertn_flush     )
 );
 
+assign decode_to_issue_valid = ds_to_es_valid;
+assign decode_to_issue_bus   = ds_to_es_bus;
+
+// Issue is lane-shaped from the outset; only lane0 is enabled in this phase.
+issue_stage issue_stage(
+    .clk             (clk                    ),
+    .reset           (reset                  ),
+    .kill            (flush || ertn_flush || ibar_flush || ex1_redirect_valid),
+    .decode_valid    (decode_to_issue_valid  ),
+    .decode_ready    (issue_decode_ready     ),
+    .decode_packet   (decode_to_issue_bus    ),
+    .lane0_valid     (issue_lane0_valid      ),
+    .lane0_ready     (ex1_allowin            ),
+    .lane0_packet    (issue_lane0_bus        ),
+    .pending_dst     (issue_to_ds_dest       ),
+    .pending_csr_we  (issue_csr_we           ),
+    .pending_csr_num (issue_csr_num          ),
+    .pending_ertn    (issue_is_ertn          ),
+    .pending_tlb     (issue_tlb_pending      )
+);
+
 // EX1 stage: early ALU, virtual address, and store-data preparation.
 ex1_stage ex1_stage(
     .clk            (clk            ),
@@ -960,6 +1029,8 @@ ex1_stage ex1_stage(
     .ex1_to_ds_dest (ex1_to_ds_dest ),
     .ex1_to_ds_result_ready(ex1_to_ds_result_ready),
     .ex1_to_ds_result(ex1_to_ds_result),
+    .ex1_redirect_valid(ex1_redirect_valid),
+    .ex1_redirect_target(ex1_redirect_target),
     .ex1_csr_we     (ex1_csr_we     ),
     .ex1_csr_num    (ex1_csr_num    ),
     .ex1_is_ertn    (ex1_is_ertn    ),
@@ -1046,7 +1117,8 @@ ex2_stage ex2_stage(
     .hw_int_in      (hw_int_in_safe )
 );
 
-// EX3 stage: final commit point, memory/cache request issue, and MEM bus output.
+// Commit (legacy module name ex3_stage): ordered exception/redirect and
+// architectural side-effect arbitration, followed by the MEM request boundary.
 ex3_stage ex3_stage(
     .clk            (clk            ),
     .reset          (reset          ),

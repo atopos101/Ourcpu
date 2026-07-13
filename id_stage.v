@@ -5,6 +5,7 @@ module id_stage(
     input                          reset         ,
     input                          flush         ,
     input                          ibar_flush    ,
+    input                          ex1_redirect  ,
     //allowin
     input                          es_allowin    ,
     output                         ds_allowin    ,
@@ -18,6 +19,12 @@ module id_stage(
     output [`BR_BUS_WD       -1:0] br_bus        ,
     //to rf: for write back
     input  [`WS_TO_RF_BUS_WD -1:0] ws_to_rf_bus  ,
+    // instruction waiting at the lane-0 Issue boundary
+    input [4:0] issue_to_ds_dest,
+    input       issue_csr_we,
+    input [13:0] issue_csr_num,
+    input       issue_is_ertn,
+    input       issue_tlb_pending,
     // hazard detect
     input [4:0] ex1_to_ds_dest,
     input [4:0] ex2_to_ds_dest,
@@ -51,8 +58,10 @@ module id_stage(
     input        ertn_flush
 );
 
-wire        br_taken;
-wire [31:0] br_target;
+wire        br_taken_raw;
+wire [31:0] br_target_raw;
+reg         br_redirect_valid_r;
+reg  [31:0] br_redirect_target_r;
 
 wire [31:0] ds_pc;
 wire [31:0] ds_inst;
@@ -505,36 +514,43 @@ regfile u_regfile(
     .wdata  (rf_wdata )
     );
 
+wire rj_hit_issue = ~src_no_rj && (rj != 5'b00000) && (rj == issue_to_ds_dest);
 wire rj_hit_ex1 = ~src_no_rj && (rj != 5'b00000) && (rj == ex1_to_ds_dest);
 wire rj_hit_ex2 = ~src_no_rj && (rj != 5'b00000) && (rj == ex2_to_ds_dest);
 wire rj_hit_ex3 = ~src_no_rj && (rj != 5'b00000) && (rj == ex3_to_ds_dest);
 wire rj_hit_ms  = ~src_no_rj && (rj != 5'b00000) && (rj == ms_to_ds_dest);
 wire rj_hit_ws  = ~src_no_rj && (rj != 5'b00000) && (rj == ws_to_ds_dest);
+wire rk_hit_issue = ~src_no_rk && (rk != 5'b00000) && (rk == issue_to_ds_dest);
 wire rk_hit_ex1 = ~src_no_rk && (rk != 5'b00000) && (rk == ex1_to_ds_dest);
 wire rk_hit_ex2 = ~src_no_rk && (rk != 5'b00000) && (rk == ex2_to_ds_dest);
 wire rk_hit_ex3 = ~src_no_rk && (rk != 5'b00000) && (rk == ex3_to_ds_dest);
 wire rk_hit_ms  = ~src_no_rk && (rk != 5'b00000) && (rk == ms_to_ds_dest);
 wire rk_hit_ws  = ~src_no_rk && (rk != 5'b00000) && (rk == ws_to_ds_dest);
+wire rd_hit_issue = ~src_no_rd && (rd != 5'b00000) && (rd == issue_to_ds_dest);
 wire rd_hit_ex1 = ~src_no_rd && (rd != 5'b00000) && (rd == ex1_to_ds_dest);
 wire rd_hit_ex2 = ~src_no_rd && (rd != 5'b00000) && (rd == ex2_to_ds_dest);
 wire rd_hit_ex3 = ~src_no_rd && (rd != 5'b00000) && (rd == ex3_to_ds_dest);
 wire rd_hit_ms  = ~src_no_rd && (rd != 5'b00000) && (rd == ms_to_ds_dest);
 wire rd_hit_ws  = ~src_no_rd && (rd != 5'b00000) && (rd == ws_to_ds_dest);
 
-wire rj_fwd_ex1 = rj_hit_ex1 && ex1_to_ds_result_ready;
+// Control flow explicitly waits across EX1/MEM below.  Keep those late data
+// values out of the ID operand mux as well, so STA does not retain an
+// unsensitizable ALU/AXI-to-branch path through the forwarding network.
+wire control_flow_op = branch_op || inst_jirl;
+wire rj_fwd_ex1 = rj_hit_ex1 && ex1_to_ds_result_ready && !control_flow_op;
 wire rj_fwd_ex2 = rj_hit_ex2 && ex2_to_ds_result_ready;
 wire rj_fwd_ex3 = rj_hit_ex3 && ex3_to_ds_result_ready;
-wire rj_fwd_ms  = rj_hit_ms  && ms_to_ds_result_ready;
+wire rj_fwd_ms  = rj_hit_ms  && ms_to_ds_result_ready && !control_flow_op;
 wire rj_fwd_ws  = rj_hit_ws  && ws_to_ds_result_ready;
 wire rk_fwd_ex1 = rk_hit_ex1 && ex1_to_ds_result_ready;
 wire rk_fwd_ex2 = rk_hit_ex2 && ex2_to_ds_result_ready;
 wire rk_fwd_ex3 = rk_hit_ex3 && ex3_to_ds_result_ready;
 wire rk_fwd_ms  = rk_hit_ms  && ms_to_ds_result_ready;
 wire rk_fwd_ws  = rk_hit_ws  && ws_to_ds_result_ready;
-wire rd_fwd_ex1 = rd_hit_ex1 && ex1_to_ds_result_ready;
+wire rd_fwd_ex1 = rd_hit_ex1 && ex1_to_ds_result_ready && !branch_op;
 wire rd_fwd_ex2 = rd_hit_ex2 && ex2_to_ds_result_ready;
 wire rd_fwd_ex3 = rd_hit_ex3 && ex3_to_ds_result_ready;
-wire rd_fwd_ms  = rd_hit_ms  && ms_to_ds_result_ready;
+wire rd_fwd_ms  = rd_hit_ms  && ms_to_ds_result_ready && !branch_op;
 wire rd_fwd_ws  = rd_hit_ws  && ws_to_ds_result_ready;
 
 wire [31:0] rj_forward_result = rj_fwd_ex1 ? ex1_to_ds_result :
@@ -568,13 +584,12 @@ assign rj_eq_rd  = (rj_value == rkd_value);
 assign rj_lt_rd  = ($signed(rj_value) < $signed(rkd_value));
 assign rj_ltu_rd = (rj_value < rkd_value);
 
-assign br_taken = (   inst_beq  &&  rj_eq_rd
+assign br_taken_raw = (   inst_beq  &&  rj_eq_rd
                    || inst_bne  && !rj_eq_rd
                    || inst_blt  &&  rj_lt_rd
                    || inst_bge  && !rj_lt_rd
                    || inst_bltu &&  rj_ltu_rd
                    || inst_bgeu && !rj_ltu_rd
-                   || inst_jirl
                    || inst_bl
                    || inst_b
                   ) && ds_ready_go && es_allowin && (fs_ex !== 1'b1);
@@ -601,32 +616,45 @@ assign src_no_rk = inst_slli_w | inst_srli_w | inst_srai_w | inst_addi_w | load_
 assign src_no_rd = inst_dbar | inst_ibar | inst_idle |
                    (~store_op & ~branch_op & ~inst_csrwr & ~inst_csrxchg);
 
-assign rj_wait = rj_hit_ex1 || rj_hit_ex2 || rj_hit_ex3 || rj_hit_ms || rj_hit_ws;
-assign rk_wait = rk_hit_ex1 || rk_hit_ex2 || rk_hit_ex3 || rk_hit_ms || rk_hit_ws;
-assign rd_wait = rd_hit_ex1 || rd_hit_ex2 || rd_hit_ex3 || rd_hit_ms || rd_hit_ws;
+assign rj_wait = rj_hit_issue || rj_hit_ex1 || rj_hit_ex2 || rj_hit_ex3 || rj_hit_ms || rj_hit_ws;
+assign rk_wait = rk_hit_issue || rk_hit_ex1 || rk_hit_ex2 || rk_hit_ex3 || rk_hit_ms || rk_hit_ws;
+assign rd_wait = rd_hit_issue || rd_hit_ex1 || rd_hit_ex2 || rd_hit_ex3 || rd_hit_ms || rd_hit_ws;
 
-assign br_target = (branch_op || inst_bl || inst_b) ? (ds_pc + br_offs) :
-                                                   /*inst_jirl*/ (rj_value + jirl_offs);
+assign br_target_raw = (branch_op || inst_bl || inst_b) ? (ds_pc + br_offs) :
+                                                       /*inst_jirl*/ (rj_value + jirl_offs);
 
-wire rj_not_ready = rj_hit_ex1 ? !ex1_to_ds_result_ready :
+wire rj_not_ready = rj_hit_issue ? 1'b1 :
+                    rj_hit_ex1 ? (!control_flow_op && !ex1_to_ds_result_ready) :
                     rj_hit_ex2 ? !ex2_to_ds_result_ready :
                     rj_hit_ex3 ? !ex3_to_ds_result_ready :
-                    rj_hit_ms  ? !ms_to_ds_result_ready  :
+                    rj_hit_ms  ? (!control_flow_op && !ms_to_ds_result_ready) :
                     rj_hit_ws  ? !ws_to_ds_result_ready  : 1'b0;
-wire rk_not_ready = rk_hit_ex1 ? !ex1_to_ds_result_ready :
+wire rk_not_ready = rk_hit_issue ? 1'b1 :
+                    rk_hit_ex1 ? !ex1_to_ds_result_ready :
                     rk_hit_ex2 ? !ex2_to_ds_result_ready :
                     rk_hit_ex3 ? !ex3_to_ds_result_ready :
                     rk_hit_ms  ? !ms_to_ds_result_ready  :
                     rk_hit_ws  ? !ws_to_ds_result_ready  : 1'b0;
-wire rd_not_ready = rd_hit_ex1 ? !ex1_to_ds_result_ready :
+wire rd_not_ready = rd_hit_issue ? 1'b1 :
+                    rd_hit_ex1 ? (!branch_op && !ex1_to_ds_result_ready) :
                     rd_hit_ex2 ? !ex2_to_ds_result_ready :
                     rd_hit_ex3 ? !ex3_to_ds_result_ready :
-                    rd_hit_ms  ? !ms_to_ds_result_ready  :
+                    rd_hit_ms  ? (!branch_op && !ms_to_ds_result_ready) :
                     rd_hit_ws  ? !ws_to_ds_result_ready  : 1'b0;
 
-assign producer_not_ready_stall = rj_not_ready || rk_not_ready || rd_not_ready;
-assign br_stall = producer_not_ready_stall & br_taken & ds_valid;
-assign br_bus = {br_stall, br_taken, br_target};
+// EX1 ALU results and MEM results that become valid from an AXI response can
+// arrive late in the cycle.  Do not let either same-cycle value feed a
+// control-flow comparison/target and then return to IF1.  Wait for the next
+// registered forwarding stage, at a one-cycle cost only for these dependencies.
+wire control_flow_ex1_stall = (branch_op && (rj_hit_ex1 || rd_hit_ex1)) ||
+                              (inst_jirl && rj_hit_ex1);
+wire control_flow_ms_stall  = (branch_op && (rj_hit_ms || rd_hit_ms)) ||
+                              (inst_jirl && rj_hit_ms);
+
+assign producer_not_ready_stall = rj_not_ready || rk_not_ready || rd_not_ready ||
+                                  control_flow_ex1_stall || control_flow_ms_stall;
+assign br_stall = producer_not_ready_stall & br_taken_raw & ds_valid;
+assign br_bus = {br_stall, br_redirect_valid_r, br_redirect_target_r};
 
 // ============================================================
 // CSR hazard detection — writer monitor
@@ -688,9 +716,9 @@ wire csr_stall;
 // a pending state-changing operation so address translation, interrupts, and
 // back-to-back TLB snapshots observe a single architectural state.
 assign csr_stall = ds_valid && (
-    ex1_csr_we || ex2_csr_we || ex3_csr_we ||
-    ex1_is_ertn || ex2_is_ertn || ex3_is_ertn ||
-    ex1_tlb_pending || ex2_tlb_pending || ex3_tlb_pending
+    issue_csr_we || ex1_csr_we || ex2_csr_we || ex3_csr_we ||
+    issue_is_ertn || ex1_is_ertn || ex2_is_ertn || ex3_is_ertn ||
+    issue_tlb_pending || ex1_tlb_pending || ex2_tlb_pending || ex3_tlb_pending
 );
 
 // ============================================================
@@ -785,12 +813,24 @@ assign ds_to_es_bus = {ds_ex,
 // Pipeline control
 // ============================================================
 assign ds_ready_go    = ds_valid && ~producer_not_ready_stall && ~csr_stall &&
-                        !flush && !ertn_flush && !ibar_flush;
+                        !flush && !ertn_flush && !ibar_flush &&
+                        !br_redirect_valid_r;
 assign ds_allowin     = !ds_valid || ds_ready_go && es_allowin;
 assign ds_to_es_valid = ds_valid && ds_ready_go;
 
 always @(posedge clk) begin
-    if (reset || flush || ertn_flush || ibar_flush || br_taken) begin
+    if (reset || flush || ertn_flush || ibar_flush || ex1_redirect) begin
+        br_redirect_valid_r  <= 1'b0;
+        br_redirect_target_r <= 32'b0;
+    end
+    else begin
+        br_redirect_valid_r <= br_taken_raw;
+        br_redirect_target_r <= br_target_raw;
+    end
+end
+
+always @(posedge clk) begin
+    if (reset || flush || ertn_flush || ibar_flush || ex1_redirect || br_redirect_valid_r) begin
         ds_valid <= 1'b0;
     end
     else if (ds_allowin) begin
@@ -798,7 +838,7 @@ always @(posedge clk) begin
     end
 
     if (fs_to_ds_valid && ds_allowin && !flush && !ertn_flush &&
-        !ibar_flush && !br_taken) begin
+        !ibar_flush && !ex1_redirect && !br_redirect_valid_r) begin
         fs_to_ds_bus_r <= fs_to_ds_bus;
     end
 end

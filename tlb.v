@@ -29,9 +29,12 @@ module tlb #(
     output reg                          s1_d,
     output reg                          s1_v,
 
-    // invalidate port; op 4/5/6 reuse search port 1 as ASID/VPPN source
+    // Dedicated invalidate port.  Keep commit-time INVTLB payload off the
+    // timing-critical combinational search port 1.
     input  wire                         invtlb_valid,
     input  wire [ 4:0]                  invtlb_op,
+    input  wire [18:0]                  inv_vppn,
+    input  wire [ 9:0]                  inv_asid,
 
     // write port
     input  wire                         we,
@@ -309,7 +312,7 @@ always @(posedge clk) begin
     end
     else if (invtlb_valid) begin
         for (inv_i = 0; inv_i < TLBNUM; inv_i = inv_i + 1) begin
-            if (inv_match(invtlb_op, s1_vppn, s1_asid,
+            if (inv_match(invtlb_op, inv_vppn, inv_asid,
                           tlb_g[inv_i], tlb_asid[inv_i],
                           tlb_vppn[inv_i], tlb_ps[inv_i])) begin
                 tlb_e[inv_i] <= 1'b0;

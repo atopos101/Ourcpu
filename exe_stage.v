@@ -16,6 +16,8 @@ module ex1_stage(
     output [4:0]                  ex1_to_ds_dest,
     output                        ex1_to_ds_result_ready,
     output [31:0]                 ex1_to_ds_result,
+    output                        ex1_redirect_valid,
+    output [31:0]                 ex1_redirect_target,
     output                        ex1_csr_we,
     output [13:0]                 ex1_csr_num,
     output                        ex1_is_ertn,
@@ -24,6 +26,7 @@ module ex1_stage(
 
 reg         ex1_valid;
 reg [`ID_TO_EX1_BUS_WD -1:0] id_to_ex1_bus_r;
+reg         redirect_sent;
 
 wire        ds_ex;
 wire [ 5:0] ds_ecode;
@@ -97,6 +100,13 @@ assign {ds_ex,
         inst_syscall,
         inst_ertn} = id_to_ex1_bus_r;
 
+// JIRL is resolved from the registered EX1 operands.  This removes its
+// register-forwarding and target-adder cone from the ID-to-IF1 path.
+wire        inst_jirl = (ds_inst[31:26] == 6'h13);
+wire [31:0] jirl_offs = {{14{ds_inst[25]}}, ds_inst[25:10], 2'b0};
+assign ex1_redirect_valid  = ex1_valid && inst_jirl && !ds_ex && !redirect_sent;
+assign ex1_redirect_target = rj_value + jirl_offs;
+
 wire [31:0] alu_src1 = src1_is_pc  ? ex1_pc : rj_value;
 wire [31:0] alu_src2 = src2_is_imm ? imm    : rkd_value;
 wire [31:0] alu_result;
@@ -123,23 +133,35 @@ wire [31:0] store_wdata = (mem_size == 2'b00) ? st_b_wdata :
 assign ex1_to_ex2_valid = ex1_valid;
 assign ex1_to_ex2_bus   = {alu_result, mem_addr, store_wdata, store_wstrb, id_to_ex1_bus_r};
 
-assign ex1_allowin = !ex1_valid && ex2_empty;
+// Elastic EX1: an instruction leaving for EX2 may be replaced in the same
+// cycle.  ex2_empty is retained only for source compatibility with the
+// migration wrapper; readiness is fully described by ex2_allowin.
+assign ex1_allowin = !ex1_valid || ex2_allowin;
 
 always @(posedge clk) begin
     if (reset || flush || ertn_flush || ibar_flush) begin
         ex1_valid <= 1'b0;
-    end
-    else if (ex1_valid && ex2_allowin) begin
-        ex1_valid <= 1'b0;
+        redirect_sent <= 1'b0;
     end
     else if (ex1_allowin) begin
         ex1_valid <= id_to_ex1_valid;
+    end
+
+    if (!(reset || flush || ertn_flush || ibar_flush)) begin
+        if (ex1_allowin) begin
+            redirect_sent <= 1'b0;
+        end
+        else if (ex1_redirect_valid) begin
+            redirect_sent <= 1'b1;
+        end
     end
 
     if (id_to_ex1_valid && ex1_allowin && !flush && !ertn_flush && !ibar_flush) begin
         id_to_ex1_bus_r <= id_to_ex1_bus;
     end
 end
+
+wire unused_ex2_empty = ex2_empty;
 
 assign ex1_to_ds_dest    = dest & {5{ex1_valid}} & {5{gr_we}};
 assign ex1_to_ds_result_ready = ex1_valid && gr_we &&
@@ -1149,13 +1171,11 @@ wire        s1_d;
 wire        s1_v;
 
 wire [31:0] data_vaddr = mem_addr;
-wire [18:0] s1_vppn = invtlb_fire  ? commit_invtlb_vppn :
-                       inst_tlbsrch ? csr_tlbehi[31:13]   :
+wire [18:0] s1_vppn = inst_tlbsrch ? csr_tlbehi[31:13]   :
                        inst_invtlb  ? rkd_value[31:13]    : data_vaddr[31:13];
 wire        s1_va_bit12 = inst_tlbsrch ? csr_tlbehi[12] :
                           inst_invtlb  ? rkd_value[12]  : data_vaddr[12];
-wire [ 9:0] s1_asid = invtlb_fire ? commit_invtlb_asid :
-                       inst_invtlb ? rj_value[9:0] : csr_asid;
+wire [ 9:0] s1_asid = inst_invtlb ? rj_value[9:0] : csr_asid;
 
 wire        tlbrd_e;
 wire [18:0] tlbrd_vppn;
@@ -1199,6 +1219,8 @@ tlb #(.TLBNUM(32)) u_tlb(
     .s1_v         (s1_v),
     .invtlb_valid (invtlb_valid),
     .invtlb_op    (commit_invtlb_op),
+    .inv_vppn     (commit_invtlb_vppn),
+    .inv_asid     (commit_invtlb_asid),
     .we           (tlb_we),
     .w_index      (commit_tlb_write_index),
     .w_e          (commit_tlb_w_e),

@@ -1,19 +1,31 @@
 # OurCPU LoongArch CPU RTL
 
-本仓库是一套使用 Verilog 实现的 32 位 LoongArch 顺序单发 CPU 设计。当前核心采用八级流水，集成取指前端、译码、执行、CSR/异常/中断、TLB 地址转换、ICache/DCache、LL/SC、Cache 维护、`DBAR`/`IBAR`、`IDLE` 以及 32 位 AXI 主接口。
+本仓库是一套使用 Verilog 实现的 32 位 LoongArch 顺序单发 CPU 设计。当前核心按 RTL 命名边界采用十级流水，集成取指前端、Fetch Queue、Decode/Issue、执行、顺序提交、CSR/异常/中断、TLB 地址转换、ICache/DCache、LL/SC、Cache 维护、`DBAR`/`IBAR`、`IDLE` 以及 32 位 AXI 主接口。
 
 当前 RTL 顶层为 `core_top`。集成到 Vivado 或仿真工程时，将本目录下全部 `.v` 和 `.vh` 文件加入工程即可。未提供 Difftest 模块时不要定义 `SIMU`。
 
 ## Pipeline
 
-核心流水结构如下：
+核心按当前 RTL 的命名边界属于**十级单发射流水**：
 
 ```text
-IF1 -> IF2 -> ID -> EX1 -> EX2 -> EX3 -> MEM -> WB
-取指   回包   译码   前执行 后执行 提交/访存 访存   写回
+IF1(F0/F1) -> IF2(F2) -> Fetch Queue -> Decode -> Issue[0]
+           -> EX1 -> EX2 -> Commit(EX3) -> MEM -> GPR WB
 ```
 
-各级之间使用 `valid/allowin` 握手。重定向统一汇总到取指前端，优先级为：
+这里的十级是在原八级流水基础上加入 Fetch Queue 和 Issue 两个寄存边界得到的。
+RTL 中 `if1_stage` 暂时封装 F0/F1，`if2_stage` 对应 F2，历史命名
+`ex3_stage` 对应 Commit。如果把 `if1_stage` 内部的 F0 和 F1 也分别作为逻辑级
+统计，则可以描述为十一段逻辑结构。
+
+Fetch Queue 是一个 4 项 FIFO，而不是只能保存一条指令的传统流水寄存器，
+因此“十级”主要用于描述从取指到写回所经过的 RTL 边界，并不表示每条指令
+始终占用十个单项流水寄存器。Fetch Queue 将已经返回的指令与 Decode 解耦；
+Issue 采用 lane0 形式的弹性寄存边界，并将其中尚未执行的目的寄存器、CSR 和
+TLB 占用反馈给 Decode，避免新增级造成冒险漏检。
+
+各级之间使用 `valid/allowin` 握手。EX1 支持下游接收旧指令的同拍接收新指令。
+重定向统一汇总到取指前端，优先级为：
 
 ```text
 ERTN > exception > IBAR > branch
@@ -21,7 +33,8 @@ ERTN > exception > IBAR > branch
 
 ### 取指前端
 
-`if_stage.v` 包含 `if1_stage`、`if2_stage` 和兼容外部接口的 `if_stage` 包装。
+`if_stage.v` 包含 `if1_stage`、`if2_stage` 和兼容外部接口的 `if_stage` 包装；
+`fetch_queue.v` 提供 F2 与 Decode 之间的 4 项队列。
 
 当前 `if1_stage` 已加入轻量 IF1b 寄存缓冲，用于切断原来的组合关键路径：
 
@@ -45,7 +58,9 @@ IF1a 负责选择请求 PC、处理 redirect、输出 `inst_vaddr`。IF1b 寄存
 | --- | --- |
 | `core_top.v` | 顶层 `core_top`、`mycpu_core`、SRAM-like 到 AXI bridge、Cache/Barrier/LLSC/Difftest 连接。 |
 | `if_stage.v` | IF1/IF2 取指前端；IF1 内含 IF1b 翻译结果缓冲。 |
+| `fetch_queue.v` | F2 到 Decode 的 4 项取指队列，redirect 时清空。 |
 | `id_stage.v` | 指令译码、寄存器读取、分支判断、前递选择和冒险控制。 |
+| `issue_stage.v` | lane0 Issue 弹性边界及新增在途 producer/串行化状态导出。 |
 | `exe_stage.v` | EX1/EX2/EX3，包含执行、地址转换、CSR/TLB 和提交控制。 |
 | `mem_stage.v` | load 数据处理、LL/SC 退休事件、MEM 到 WB 总线。 |
 | `wb_stage.v` | 通用寄存器写回和 debug trace 输出。 |
@@ -161,4 +176,7 @@ uncached write/read > DCache writeback > DCache refill > ICache refill
 4. 在 SoC/testbench 中覆盖算术、分支、load/store、CSR、异常、中断、TLB、Cache、LL/SC、DBAR/IBAR、IDLE 和非缓存访问。
 ```
 
-当前前端已经加入 IF1b 取指翻译缓冲，功能仿真已按顺序取指、redirect、ADEF、TLB 异常、IDLE/IBAR 等场景验证通过。55MHz 约束下，IF1/TLB/PC 组合闭环已不再是首要关键路径；后续提频需要继续针对新的 routed worst path 做局部优化。
+当前前端已经加入 IF1b 取指翻译缓冲和 4 项 Fetch Queue，后端增加独立
+lane0 Issue 边界，EX3 明确作为 Commit。`tests/target_arch_tb.v` 覆盖 Fetch
+Queue 顺序/flush 以及 Issue backpressure/payload 稳定性。更完整的 epoch、统一
+instruction packet 和副作用 commit pulse 属于指导书后续章节，尚未在本阶段展开。
