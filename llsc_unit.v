@@ -1,3 +1,5 @@
+`timescale 1ns/1ps
+`default_nettype wire
 module llsc_unit(
     input         clk,
     input         reset,
@@ -25,12 +27,33 @@ module llsc_unit(
 reg        reservation_valid_r;
 reg [27:0] reservation_line_r;
 
+wire local_store_hit = local_store_commit_valid &&
+                       (local_store_commit_line == reservation_line_r);
+wire dcache_inv_hit = dcache_inv_valid &&
+                      (dcache_inv_line == reservation_line_r);
 wire external_store_hit = external_store_valid &&
                           (external_store_line == reservation_line_r);
 wire ertn_clear = ertn_commit && !llbctl_klo;
 
-wire reservation_clear = sc_commit_valid || wcllb_commit || ertn_clear ||
-                         (reservation_valid_r && external_store_hit);
+wire reservation_global_clear = sc_commit_valid || wcllb_commit || ertn_clear;
+
+// A concurrent coherence/invalidation event for the line loaded by LL must
+// prevent a new reservation from being established in that cycle.
+wire ll_line_invalidated = ll_commit_valid &&
+                           ((local_store_commit_valid &&
+                             (local_store_commit_line == ll_commit_line)) ||
+                            (dcache_inv_valid &&
+                             (dcache_inv_line == ll_commit_line)) ||
+                            (external_store_valid &&
+                             (external_store_line == ll_commit_line)));
+
+// This signal is also observed by the simulation retirement snapshot.  It
+// describes the next-state clear decision after accounting for a concurrent
+// LL that establishes a reservation on a different, unaffected line.
+wire reservation_clear = reservation_global_clear || ll_line_invalidated ||
+                         (!ll_commit_valid && reservation_valid_r &&
+                          (local_store_hit || dcache_inv_hit ||
+                           external_store_hit));
 
 // Reservation queries must depend only on registered state.  Feeding
 // same-cycle retirement events into these outputs creates a combinational
@@ -41,20 +64,22 @@ wire current_reservation_match = reservation_valid_r &&
                                  (reservation_line_r == sc_query_line);
 assign sc_can_store = current_reservation_match;
 
-wire unused_local_store = local_store_commit_valid | (|local_store_commit_line);
-wire unused_dcache_inv  = dcache_inv_valid | (|dcache_inv_line);
+// The current single-core model keys reservations by physical cache line for
+// both cached and uncached accesses.  Keep the cacheability input in the
+// frozen interface for a future coherent implementation.
+wire unused_sc_query_cached = sc_query_cached;
 
 always @(posedge clk) begin
     if (reset) begin
         reservation_valid_r <= 1'b0;
         reservation_line_r  <= 28'b0;
     end
+    else if (reservation_clear || ll_line_invalidated) begin
+        reservation_valid_r <= 1'b0;
+    end
     else if (ll_commit_valid) begin
         reservation_valid_r <= 1'b1;
         reservation_line_r  <= ll_commit_line;
-    end
-    else if (reservation_clear) begin
-        reservation_valid_r <= 1'b0;
     end
 end
 

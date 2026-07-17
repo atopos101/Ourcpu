@@ -1,18 +1,20 @@
 
+`timescale 1ns/1ps
+`default_nettype wire
 `include "mycpu.vh"
 
 module mem_stage(
     input                          clk,
     input                          reset,
 
-    // allowin
-    input                          ws_allowin,
-    output                         ms_allowin,
+    // valid/ready pipeline handshake
+    input                          ms_to_ws_ready,
+    output                         ex3_to_mem_ready,
     output                         ms_empty,
 
-    // from es
-    input                          es_to_ms_valid,
-    input  [`ES_TO_MS_BUS_WD -1:0] es_to_ms_bus,
+    // from Commit/EX3
+    input                          ex3_to_mem_valid,
+    input  [`ES_TO_MS_BUS_WD -1:0] ex3_to_mem_bus,
 
     // to ws
     output                         ms_to_ws_valid,
@@ -28,16 +30,13 @@ module mem_stage(
     output                         local_store_commit_valid,
     output [27:0]                  mem_commit_line,
 
-    // forward
-    output [4:0]                   ms_to_ds_dest,
-    output                         ms_to_ds_result_ready,
-    output [31:0]                  ms_to_ds_result
+    output [`PRODUCER_PACKET_WD-1:0] mem_producer_packet
 );
 
 reg         ms_valid;
-wire        ms_ready_go;
+wire        ms_operation_ready;
 
-reg [`ES_TO_MS_BUS_WD -1:0] es_to_ms_bus_r;
+reg [`ES_TO_MS_BUS_WD -1:0] ex3_to_mem_bus_r;
 
 //==========================================================
 // bus decode
@@ -56,8 +55,12 @@ wire        ms_gr_we;
 wire [4:0]  ms_dest;
 wire [31:0] ms_alu_result;
 wire [31:0] ms_pc;
+wire [31:0] ms_seq_id;
+wire        ms_lane_id;
 
 assign {
+        ms_seq_id,
+        ms_lane_id,
         ms_inst_ll_w,
         ms_inst_sc_w,
         ms_sc_success,
@@ -71,10 +74,10 @@ assign {
         ms_dest,         //68:64
         ms_alu_result,   //63:32
         ms_pc            //31:0
-       } = es_to_ms_bus_r;
+       } = ex3_to_mem_bus_r;
 
 //==========================================================
-// ready_go
+// operation completion
 //==========================================================
 
 // load/store:
@@ -83,17 +86,17 @@ assign {
 // others:
 //     pass directly
 
-assign ms_ready_go =
+assign ms_operation_ready =
        !ms_mem_access
     || data_sram_data_ok;
 
 //==========================================================
-// allowin
+// upstream readiness
 //==========================================================
 
-assign ms_allowin =
+assign ex3_to_mem_ready =
        !ms_valid
-    || (ms_ready_go && ws_allowin);
+    || (ms_operation_ready && ms_to_ws_ready);
 
 assign ms_empty = !ms_valid;
 
@@ -103,18 +106,18 @@ assign ms_empty = !ms_valid;
 
 assign ms_to_ws_valid =
        ms_valid
-    && ms_ready_go;
+    && ms_operation_ready;
 
 always @(posedge clk) begin
     if(reset) begin
         ms_valid <= 1'b0;
     end
-    else if(ms_allowin) begin
-        ms_valid <= es_to_ms_valid;
+    else if(ex3_to_mem_ready) begin
+        ms_valid <= ex3_to_mem_valid;
     end
 
-    if(es_to_ms_valid && ms_allowin) begin
-        es_to_ms_bus_r <= es_to_ms_bus;
+    if(ex3_to_mem_valid && ex3_to_mem_ready) begin
+        ex3_to_mem_bus_r <= ex3_to_mem_bus;
     end
 end
 
@@ -164,7 +167,9 @@ assign ms_final_result =
     ? mem_result
     : ms_alu_result;
 
-wire ms_commit = ms_valid && ms_ready_go && ws_allowin;
+wire ms_out_fire = ms_to_ws_valid && ms_to_ws_ready;
+wire ms_in_fire  = ex3_to_mem_valid && ex3_to_mem_ready;
+wire ms_commit = ms_out_fire;
 
 assign ll_commit_valid = ms_commit && ms_inst_ll_w;
 assign sc_commit_valid = ms_commit && ms_inst_sc_w;
@@ -177,6 +182,8 @@ assign mem_commit_line = ms_mem_line;
 //==========================================================
 
 assign ms_to_ws_bus = {
+        ms_seq_id,
+        ms_lane_id,
         ms_gr_we,
         ms_dest,
         ms_final_result,
@@ -193,14 +200,35 @@ assign ms_to_ws_bus = {
 //
 // 不能仅 ms_valid
 
-assign ms_to_ds_dest =
-       ms_dest
-    & {5{ms_valid}}
-    & {5{ms_gr_we}};
+// seq_id is carried in the lane sideband in the current single-lane MEM
+// payload and is widened below when the canonical retirement packet is built.
+// Until then producer order, not the numeric ID, selects this value.
+producer_packet_pack u_mem_producer_packet(
+    .valid(ms_valid), .seq_id(ms_seq_id), .dst_valid(ms_gr_we), .dst(ms_dest),
+    .value_valid(ms_to_ws_valid && ms_gr_we), .value(ms_final_result),
+    .packet(mem_producer_packet)
+);
 
-assign ms_to_ds_result_ready = ms_to_ws_valid && ms_gr_we;
-
-assign ms_to_ds_result = ms_final_result;
+`ifndef SYNTHESIS
+reg                        ms_stalled_last;
+reg [`ES_TO_MS_BUS_WD-1:0] ms_payload_last;
+always @(posedge clk) begin
+    if (reset) begin
+        ms_stalled_last <= 1'b0;
+    end
+    else begin
+        if (ms_stalled_last && (!ms_to_ws_valid ||
+                                ex3_to_mem_bus_r !== ms_payload_last))
+            $error("MEM payload changed while stalled");
+        ms_stalled_last <= ms_to_ws_valid && !ms_to_ws_ready;
+        ms_payload_last <= ex3_to_mem_bus_r;
+        if ((ll_commit_valid || sc_commit_valid || local_store_commit_valid) &&
+            !ms_commit)
+            $error("LL/SC/store reservation side effect fired without MEM commit");
+    end
+end
+wire unused_ms_in_fire = ms_in_fire;
+`endif
 
 endmodule
 

@@ -1,4 +1,5 @@
 `timescale 1ns / 1ps
+`default_nettype none
 
 module dcache (
     input  wire        clk,
@@ -24,6 +25,7 @@ module dcache (
     input  wire        cacop_clean_only,
     output reg         cacop_ok,
     output wire        idle,
+    output wire        miss_event,
     output reg         line_inv_valid,
     output reg  [27:0] line_inv_addr,
 
@@ -97,6 +99,7 @@ assign way1_tag = tagv_rdata[1][20:1];
 assign way0_hit = way0_v && (way0_tag == req_tag);
 assign way1_hit = way1_v && (way1_tag == req_tag);
 assign cache_hit = way0_hit || way1_hit;
+assign miss_event = (state == S_LOOKUP) && !cache_hit;
 assign hit_way = way1_hit;
 
 wire        cacop_hit_mode;

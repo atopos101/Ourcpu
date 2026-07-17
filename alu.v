@@ -111,26 +111,85 @@ module piped_multiplier(
     output reg [31:0] result
 );
 
-wire signed [32:0] signed_src1 = {signed_hi && src1[31], src1};
-wire signed [32:0] signed_src2 = {signed_hi && src2[31], src2};
-wire signed [65:0] full_result = signed_src1 * signed_src2;
-wire [31:0] next_result = high_result ? full_result[63:32] :
-                                         full_result[31:0];
+reg        [15:0] src1_lo_m0;
+reg        [15:0] src2_lo_m0;
+reg signed [16:0] src1_hi_m0;
+reg signed [16:0] src2_hi_m0;
+reg               high_m0;
+reg               m0_valid;
+(* use_dsp = "yes" *) reg        [31:0] product_ll_m1;
+(* use_dsp = "yes" *) reg signed [32:0] product_lh_m1;
+(* use_dsp = "yes" *) reg signed [32:0] product_hl_m1;
+(* use_dsp = "yes" *) reg signed [33:0] product_hh_m1;
+reg               high_m1;
+reg               m1_valid;
+
+// Decompose each 32-bit operand into a non-negative low half and a signed
+// high half:
+//
+//   src = src_lo + (src_hi << 16)
+//
+// An unsigned high half is zero-extended to 17 bits; a signed high half is
+// sign-extended.  Four independent 16/17-bit products map directly to four
+// DSP48s.  This avoids Vivado's very expensive constrained technology-mapping
+// search for a monolithic registered 33x33 signed multiplier.
+wire signed [65:0] product_ll_ext =
+    $signed({34'b0, product_ll_m1});
+wire signed [65:0] product_lh_ext =
+    $signed({{33{product_lh_m1[32]}}, product_lh_m1}) <<< 16;
+wire signed [65:0] product_hl_ext =
+    $signed({{33{product_hl_m1[32]}}, product_hl_m1}) <<< 16;
+wire signed [65:0] product_hh_ext =
+    $signed({{32{product_hh_m1[33]}}, product_hh_m1}) <<< 32;
+wire signed [65:0] product_m1 =
+    product_ll_ext + product_lh_ext + product_hl_ext + product_hh_ext;
 
 always @(posedge clk) begin
     if (reset || cancel) begin
         busy   <= 1'b0;
         done   <= 1'b0;
         result <= 32'b0;
+        src1_lo_m0 <= 16'b0;
+        src2_lo_m0 <= 16'b0;
+        src1_hi_m0 <= 17'b0;
+        src2_hi_m0 <= 17'b0;
+        high_m0 <= 1'b0;
+        m0_valid <= 1'b0;
+        product_ll_m1 <= 32'b0;
+        product_lh_m1 <= 33'b0;
+        product_hl_m1 <= 33'b0;
+        product_hh_m1 <= 34'b0;
+        high_m1 <= 1'b0;
+        m1_valid <= 1'b0;
     end
     else if (start && !busy && !done) begin
         busy   <= 1'b1;
         done   <= 1'b0;
-        result <= next_result;
+        src1_lo_m0 <= src1[15:0];
+        src2_lo_m0 <= src2[15:0];
+        src1_hi_m0 <= signed_hi ? {src1[31], src1[31:16]} :
+                                  {1'b0, src1[31:16]};
+        src2_hi_m0 <= signed_hi ? {src2[31], src2[31:16]} :
+                                  {1'b0, src2[31:16]};
+        high_m0 <= high_result;
+        m0_valid <= 1'b1;
     end
-    else if (busy) begin
-        busy <= 1'b0;
-        done <= 1'b1;
+    else begin
+        if (m0_valid) begin
+            product_ll_m1 <= src1_lo_m0 * src2_lo_m0;
+            product_lh_m1 <= $signed({1'b0, src1_lo_m0}) * src2_hi_m0;
+            product_hl_m1 <= src1_hi_m0 * $signed({1'b0, src2_lo_m0});
+            product_hh_m1 <= src1_hi_m0 * src2_hi_m0;
+            high_m1    <= high_m0;
+            m0_valid   <= 1'b0;
+            m1_valid   <= 1'b1;
+        end
+        if (m1_valid) begin
+            result   <= high_m1 ? product_m1[63:32] : product_m1[31:0];
+            m1_valid <= 1'b0;
+            busy     <= 1'b0;
+            done     <= 1'b1;
+        end
     end
 end
 

@@ -1,4 +1,5 @@
 `timescale 1ns / 1ps
+`default_nettype none
 
 module icache (
     input  wire        clk,
@@ -11,10 +12,15 @@ module icache (
     input  wire [ 3:0] offset,
     input  wire [ 3:0] wstrb,
     input  wire [31:0] wdata,
+    input  wire [31:0] req_pc,
+    input  wire [ 3:0] req_epoch,
 
     output wire        addr_ok,
     output reg         data_ok,
-    output reg  [31:0] rdata,
+    output reg  [63:0] resp_data,
+    output reg  [31:0] resp_pc,
+    output reg  [ 1:0] resp_word_valid,
+    output reg  [ 3:0] resp_epoch,
 
     input  wire        cacop_valid,
     input  wire [ 1:0] cacop_op,
@@ -23,6 +29,7 @@ module icache (
     input  wire [19:0] cacop_tag,
     output reg         cacop_ok,
     output wire        idle,
+    output wire        miss_event,
 
     output reg         rd_req,
     output wire [ 2:0] rd_type,
@@ -58,6 +65,8 @@ reg [19:0] req_tag;
 reg [ 3:0] req_offset;
 reg [ 3:0] req_wstrb;
 reg [31:0] req_wdata;
+reg [31:0] req_vpc;
+reg [ 3:0] req_fetch_epoch;
 reg [ 1:0] req_cacop_op;
 reg        req_cacop_way;
 
@@ -140,8 +149,14 @@ wire [31:0] refill_word;
 assign refill_word = (req_op && (refill_cnt == req_bank)) ?
                      merge_word(ret_data, req_wdata, req_wstrb) : ret_data;
 
-assign addr_ok = (state == S_IDLE) && valid && !cacop_valid;
+// A hit can retire while the next lookup address is accepted.  Misses and
+// maintenance operations retain exclusive ownership of the single RAM port.
+wire lookup_pipeline_ready = (state == S_IDLE) ||
+                             ((state == S_LOOKUP) && cache_hit);
+wire lookup_accept = valid && !cacop_valid && lookup_pipeline_ready;
+assign addr_ok = lookup_accept;
 assign idle = (state == S_IDLE) && !rd_req && !wr_req;
+assign miss_event = (state == S_LOOKUP) && !cache_hit;
 
 assign rd_type = REQ_READ_LINE;
 assign rd_addr = {req_tag, req_index, 4'b0000};
@@ -159,11 +174,13 @@ always @(*) begin
     for (wi = 0; wi < 2; wi = wi + 1) begin
         tagv_we[wi]    = 1'b0;
         tagv_wdata[wi] = {req_tag, 1'b1};
-        tagv_addr[wi]  = (state == S_IDLE) ? lookup_index : req_index;
+        tagv_addr[wi]  = lookup_accept ? index :
+                         ((state == S_IDLE) ? lookup_index : req_index);
         for (bi = 0; bi < 4; bi = bi + 1) begin
             bank_we[wi][bi]    = 1'b0;
             bank_wdata[wi][bi] = 32'b0;
-            bank_addr[wi][bi]  = (state == S_IDLE) ? lookup_index : req_index;
+            bank_addr[wi][bi]  = lookup_accept ? index :
+                                 ((state == S_IDLE) ? lookup_index : req_index);
         end
     end
 
@@ -191,7 +208,10 @@ always @(posedge clk) begin
     if (!resetn) begin
         state      <= S_IDLE;
         data_ok    <= 1'b0;
-        rdata      <= 32'b0;
+        resp_data  <= 64'b0;
+        resp_pc    <= 32'b0;
+        resp_word_valid <= 2'b0;
+        resp_epoch <= 4'b0;
         rd_req     <= 1'b0;
         wr_req     <= 1'b0;
         wr_issued  <= 1'b0;
@@ -206,6 +226,7 @@ always @(posedge clk) begin
     end
     else begin
         data_ok <= 1'b0;
+        resp_word_valid <= 2'b0;
         cacop_ok <= 1'b0;
 
         case (state)
@@ -226,6 +247,8 @@ always @(posedge clk) begin
                 req_offset <= offset;
                 req_wstrb  <= wstrb;
                 req_wdata  <= wdata;
+                req_vpc    <= req_pc;
+                req_fetch_epoch <= req_epoch;
                 state      <= S_LOOKUP;
             end
         end
@@ -234,13 +257,33 @@ always @(posedge clk) begin
             if (cache_hit) begin
                 data_ok <= 1'b1;
                 if (!req_op) begin
-                    rdata <= hit_word;
+                    // The front-end response contract is already 64-bit, but
+                    // this first implementation conservatively supplies only
+                    // slot0.  Cross-line/page handling therefore remains a
+                    // single-word request until the two-slot queue is enabled.
+                    resp_data       <= {32'b0, hit_word};
+                    resp_pc         <= req_vpc;
+                    resp_word_valid <= 2'b01;
+                    resp_epoch      <= req_fetch_epoch;
                 end
                 else begin
                     d_table[hit_way][req_index] <= 1'b1;
                 end
                 lru[req_index] <= ~hit_way;
-                state <= S_IDLE;
+                if (lookup_accept) begin
+                    req_op     <= op;
+                    req_index  <= index;
+                    req_tag    <= tag;
+                    req_offset <= offset;
+                    req_wstrb  <= wstrb;
+                    req_wdata  <= wdata;
+                    req_vpc    <= req_pc;
+                    req_fetch_epoch <= req_epoch;
+                    state      <= S_LOOKUP;
+                end
+                else begin
+                    state <= S_IDLE;
+                end
             end
             else begin
                 replace_way <= (!way0_v) ? 1'b0 :
@@ -307,8 +350,11 @@ always @(posedge clk) begin
             wr_req <= 1'b0;
             if (ret_valid) begin
                 if (!req_op && (refill_cnt == req_bank)) begin
-                    rdata   <= ret_data;
-                    data_ok <= 1'b1;
+                    resp_data       <= {32'b0, ret_data};
+                    resp_pc         <= req_vpc;
+                    resp_word_valid <= 2'b01;
+                    resp_epoch      <= req_fetch_epoch;
+                    data_ok         <= 1'b1;
                 end
 
                 if (ret_last) begin

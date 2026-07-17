@@ -1,3 +1,5 @@
+`timescale 1ns/1ps
+`default_nettype none
 module decoder_6_64(
     input  wire [ 5:0] in,
     output wire [63:0] out

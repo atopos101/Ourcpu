@@ -1,6 +1,8 @@
 `include "mycpu.vh"
 
-module core_top(
+module core_top #(
+    parameter integer ENABLE_BP = 1
+)(
     input           aclk,
     input           aresetn,
     input    [ 7:0] intrpt, 
@@ -67,9 +69,14 @@ wire [ 1:0] core_inst_size;
 wire [ 3:0] core_inst_wstrb;
 wire [31:0] core_inst_addr;
 wire [31:0] core_inst_wdata;
+wire [31:0] core_inst_req_pc;
+wire [`FETCH_EPOCH_WD-1:0] core_inst_req_epoch;
 wire        core_inst_addr_ok;
 wire        core_inst_data_ok;
-wire [31:0] core_inst_rdata;
+wire [63:0] core_inst_resp_data;
+wire [31:0] core_inst_resp_pc;
+wire [ 1:0] core_inst_resp_word_valid;
+wire [`FETCH_EPOCH_WD-1:0] core_inst_resp_epoch;
 
 wire        icache_rd_req;
 wire [ 2:0] icache_rd_type;
@@ -101,6 +108,8 @@ wire        icache_cacop_ok;
 wire        dcache_cacop_ok;
 wire        icache_idle;
 wire        dcache_idle;
+wire        icache_miss_event;
+wire        dcache_miss_event;
 
 wire        core_barrier_req;
 wire        core_barrier_is_ibar;
@@ -143,19 +152,28 @@ wire        uncache_addr_ok;
 wire        uncache_data_ok;
 wire [31:0] uncache_rdata;
 
-mycpu_core u_core(
+mycpu_core #(
+    .ENABLE_BP(ENABLE_BP)
+) u_core(
     .clk                (aclk                ),
     .resetn             (aresetn             ),
     .hw_int_in          (intrpt              ),
+    .icache_miss_event  (icache_miss_event   ),
+    .dcache_miss_event  (dcache_miss_event   ),
     .inst_sram_req      (core_inst_req       ),
     .inst_sram_wr       (core_inst_wr        ),
     .inst_sram_size     (core_inst_size      ),
     .inst_sram_wstrb    (core_inst_wstrb     ),
     .inst_sram_addr     (core_inst_addr      ),
     .inst_sram_wdata    (core_inst_wdata     ),
+    .inst_sram_req_pc   (core_inst_req_pc    ),
+    .inst_sram_req_epoch(core_inst_req_epoch ),
     .inst_sram_addr_ok  (core_inst_addr_ok   ),
     .inst_sram_data_ok  (core_inst_data_ok   ),
-    .inst_sram_rdata    (core_inst_rdata     ),
+    .inst_sram_resp_data(core_inst_resp_data ),
+    .inst_sram_resp_pc  (core_inst_resp_pc   ),
+    .inst_sram_resp_word_valid(core_inst_resp_word_valid),
+    .inst_sram_resp_epoch(core_inst_resp_epoch),
     .data_sram_req      (core_data_req       ),
     .data_sram_wr       (core_data_wr        ),
     .data_sram_size     (core_data_size      ),
@@ -231,9 +249,14 @@ icache u_icache(
     .offset             (core_inst_addr[3:0] ),
     .wstrb              (4'b0                ),
     .wdata              (32'b0               ),
+    .req_pc             (core_inst_req_pc    ),
+    .req_epoch          (core_inst_req_epoch ),
     .addr_ok            (core_inst_addr_ok   ),
     .data_ok            (core_inst_data_ok   ),
-    .rdata              (core_inst_rdata     ),
+    .resp_data          (core_inst_resp_data ),
+    .resp_pc            (core_inst_resp_pc   ),
+    .resp_word_valid    (core_inst_resp_word_valid),
+    .resp_epoch         (core_inst_resp_epoch),
     .cacop_valid        (barrier_icache_valid ||
                          (core_cacop_valid && !core_cacop_is_dcache)),
     .cacop_op           (barrier_icache_valid ? 2'b00 : core_cacop_op),
@@ -242,6 +265,7 @@ icache u_icache(
     .cacop_tag          (barrier_icache_valid ? 20'b0 : core_cacop_tag),
     .cacop_ok           (icache_cacop_ok     ),
     .idle               (icache_idle         ),
+    .miss_event         (icache_miss_event   ),
     .rd_req             (icache_rd_req       ),
     .rd_type            (icache_rd_type      ),
     .rd_addr            (icache_rd_addr      ),
@@ -279,6 +303,7 @@ dcache u_dcache(
     .cacop_clean_only   (barrier_dcache_valid),
     .cacop_ok           (dcache_cacop_ok     ),
     .idle               (dcache_idle         ),
+    .miss_event         (dcache_miss_event   ),
     .line_inv_valid     (dcache_line_inv_valid),
     .line_inv_addr      (dcache_line_inv_addr),
     .rd_req             (dcache_rd_req       ),
@@ -617,11 +642,15 @@ assign data_busy = (state == ST_WR_ADDR) ||
 
 endmodule
 
-module mycpu_core(
+module mycpu_core #(
+    parameter integer ENABLE_BP = 1
+)(
     input         clk,
     input         resetn,
     // 8 external hardware interrupt lines (tie to 0 if unused)
     input  [7:0]  hw_int_in,
+    input         icache_miss_event,
+    input         dcache_miss_event,
     // inst sram interface (bus-style)
     output        inst_sram_req,
     output        inst_sram_wr,
@@ -629,9 +658,14 @@ module mycpu_core(
     output [ 3:0] inst_sram_wstrb,
     output [31:0] inst_sram_addr,
     output [31:0] inst_sram_wdata,
+    output [31:0] inst_sram_req_pc,
+    output [`FETCH_EPOCH_WD-1:0] inst_sram_req_epoch,
     input         inst_sram_addr_ok,
     input         inst_sram_data_ok,
-    input  [31:0] inst_sram_rdata,
+    input  [63:0] inst_sram_resp_data,
+    input  [31:0] inst_sram_resp_pc,
+    input  [ 1:0] inst_sram_resp_word_valid,
+    input  [`FETCH_EPOCH_WD-1:0] inst_sram_resp_epoch,
     // data sram interface (bus-style)
     output        data_sram_req,
     output        data_sram_wr,
@@ -673,22 +707,22 @@ always @(posedge clk) begin
     end
 end
 
-wire         ds_allowin;
-wire         es_allowin;
-wire         ms_allowin;
-wire         ws_allowin;
+wire         fetch_queue_to_decode_ready;
+wire [`ARCH_LANE_COUNT-1:0] decode_to_issue_ready;
+wire         issue_to_ex1_ready;
+wire         ex1_to_ex2_ready;
+wire         ex2_to_ex3_ready;
+wire         ex3_to_mem_ready;
+wire         mem_to_wb_ready;
 wire         fs_to_ds_valid;
 wire         ds_to_es_valid;
-wire         es_to_ms_valid;
 wire         ms_to_ws_valid;
 wire         ms_empty;
 wire         ws_empty;
 wire [`FS_TO_DS_BUS_WD -1:0] fs_to_ds_bus;
 wire [`DS_TO_ES_BUS_WD -1:0] ds_to_es_bus;
-wire [`ES_TO_MS_BUS_WD -1:0] es_to_ms_bus;
 wire [`MS_TO_WS_BUS_WD -1:0] ms_to_ws_bus;
 wire [`WS_TO_RF_BUS_WD -1:0] ws_to_rf_bus;
-wire [`BR_BUS_WD       -1:0] br_bus;
 
 // Target-architecture decoupling boundaries.
 wire         f2_to_fetch_queue_valid;
@@ -696,28 +730,38 @@ wire         fetch_queue_to_decode_valid;
 wire         fetch_queue_in_ready;
 wire [`FS_TO_DS_BUS_WD-1:0] f2_to_fetch_queue_bus;
 wire [`FS_TO_DS_BUS_WD-1:0] fetch_queue_to_decode_bus;
+wire         fetch_queue_slot1_valid;
+wire         fetch_queue_packet_valid;
+wire [`FS_TO_DS_BUS_WD-1:0] fetch_queue_slot1_bus;
 wire [2:0]   fetch_queue_occupancy;
-wire         decode_to_issue_valid;
-wire         issue_decode_ready;
-wire [`ID_TO_EX1_BUS_WD-1:0] decode_to_issue_bus;
-wire         issue_lane0_valid;
-wire [`ID_TO_EX1_BUS_WD-1:0] issue_lane0_bus;
+wire [`ARCH_LANE_COUNT-1:0] decode_to_issue_valid;
+wire [`ARCH_LANE_COUNT*`ID_TO_EX1_BUS_WD-1:0] decode_to_issue_bus;
+wire [`ARCH_LANE_COUNT-1:0] issue_lane_valid;
+wire [`ARCH_LANE_COUNT-1:0] issue_lane_ready;
+wire [`ARCH_LANE_COUNT*`ID_TO_EX1_BUS_WD-1:0] issue_lane_bus;
+wire issue_lane0_valid = issue_lane_valid[0];
+wire [`ID_TO_EX1_BUS_WD-1:0] issue_lane0_bus =
+    issue_lane_bus[0 +: `ID_TO_EX1_BUS_WD];
 wire [4:0]   issue_to_ds_dest;
 wire         issue_csr_we;
 wire [13:0]  issue_csr_num;
 wire         issue_is_ertn;
 wire         issue_tlb_pending;
+wire [`PRODUCER_PACKET_WD-1:0] issue_producer_packet;
+wire [`PRODUCER_PACKET_WD-1:0] ex1_producer_packet;
+wire [`PRODUCER_PACKET_WD-1:0] ex2_producer_packet;
+wire [`PRODUCER_PACKET_WD-1:0] ex3_producer_packet;
+wire [`PRODUCER_PACKET_WD-1:0] mem_producer_packet;
+wire [`PRODUCER_PACKET_WD-1:0] wb_producer_packet;
+wire issue_stall_data;
+wire issue_stall_struct;
+wire branch_resolve_fire;
+wire [`ARCH_LANE_COUNT-1:0] commit_lane_valid;
+wire [`ARCH_LANE_COUNT*32-1:0] commit_lane_seq_id;
+wire [`ARCH_LANE_COUNT-1:0] commit_lane_id;
 
-// Seven-stage migration aliases. Phase 1 keeps the existing five-stage
-// modules connected while making the new stage boundaries visible.
-wire         if1_allowin;
-wire         if2_allowin;
-wire         id_allowin;
-wire         ex1_allowin;
-wire         ex2_allowin;
-wire         ex3_allowin;
-wire         mem_allowin;
-wire         wb_allowin;
+// Every pipeline boundary is an explicit valid/ready pair.
+wire         if1_to_if2_ready;
 wire         if1_to_if2_valid;
 wire         if2_to_id_valid;
 wire         id_to_ex1_valid;
@@ -728,42 +772,31 @@ wire         mem_to_wb_valid;
 wire         ex2_empty;
 wire         ex3_empty;
 wire [`IF1_TO_IF2_BUS_WD -1:0] if1_to_if2_bus;
+wire [`FETCH_EPOCH_WD-1:0] current_fetch_epoch;
 wire [`IF2_TO_ID_BUS_WD  -1:0] if2_to_id_bus;
 wire [`ID_TO_EX1_BUS_WD  -1:0] id_to_ex1_bus;
 wire [`EX1_TO_EX2_BUS_WD -1:0] ex1_to_ex2_bus;
 wire [`EX2_TO_EX3_BUS_WD -1:0] ex2_to_ex3_bus;
 wire [`EX3_TO_MEM_BUS_WD -1:0] ex3_to_mem_bus;
+wire        ex1_redirect_valid;
+wire [31:0] ex1_redirect_target;
+wire [31:0] ex1_redirect_seq_id;
+wire [`FETCH_EPOCH_WD-1:0] ex1_redirect_epoch;
+wire        redirect_valid;
+wire        branch_redirect_valid;
+wire [31:0] branch_redirect_target;
+wire [31:0] branch_redirect_seq_id;
+wire [`FETCH_EPOCH_WD-1:0] branch_redirect_epoch;
 
-assign if1_allowin      = if2_allowin;
-assign id_allowin       = ds_allowin;
-assign es_allowin       = issue_decode_ready;
-assign mem_allowin      = ms_allowin;
-assign wb_allowin       = ws_allowin;
 assign if2_to_id_valid  = fetch_queue_to_decode_valid;
 // A JIRL resolves in EX1.  The sequential instruction may already be waiting
 // in Issue at that point; do not let it enter EX1 on the redirect edge.
-assign id_to_ex1_valid  = issue_lane0_valid && !ex1_redirect_valid;
-assign es_to_ms_valid   = ex3_to_mem_valid;
+assign id_to_ex1_valid  = issue_lane0_valid && !ex1_redirect_valid &&
+                          !branch_redirect_valid && !redirect_valid;
 assign mem_to_wb_valid  = ms_to_ws_valid;
 assign if2_to_id_bus    = fetch_queue_to_decode_bus;
 assign id_to_ex1_bus    = issue_lane0_bus;
-assign es_to_ms_bus     = ex3_to_mem_bus;
 
-wire [4:0] ex1_to_ds_dest;
-wire [4:0] ex2_to_ds_dest;
-wire [4:0] ex3_to_ds_dest;
-wire [4:0] ms_to_ds_dest;
-wire [4:0] ws_to_ds_dest;
-wire       ex1_to_ds_result_ready;
-wire       ex2_to_ds_result_ready;
-wire       ex3_to_ds_result_ready;
-wire       ms_to_ds_result_ready;
-wire       ws_to_ds_result_ready;
-wire [31:0] ex1_to_ds_result;
-wire [31:0] ex2_to_ds_result;
-wire [31:0] ex3_to_ds_result;
-wire [31:0] ms_to_ds_result;
-wire [31:0] ws_to_ds_result;
 wire [31:0] inst_vaddr;
 wire [31:0] inst_paddr;
 wire        inst_trans_ex;
@@ -788,27 +821,55 @@ wire [31:0] ertn_pc_from_ex2;
 wire        ibar_flush;
 wire [31:0] ibar_target;
 wire        idle_wait;
-wire        br_stall;
-wire        br_taken;
-wire [31:0] br_target;
-wire        ex1_redirect_valid;
-wire [31:0] ex1_redirect_target;
-wire        redirect_valid;
 wire [31:0] redirect_pc;
 wire [ 1:0] redirect_cause;
+wire [31:0] redirect_seq_id;
+wire [`FETCH_EPOCH_WD-1:0] redirect_epoch;
+wire [`REDIRECT_PACKET_WD-1:0] redirect_packet;
+wire [31:0] commit_redirect_seq_id;
+wire [`FETCH_EPOCH_WD-1:0] commit_redirect_epoch;
+// Commit-to-predictor training boundary.
+wire        bp_update_valid;
+wire [31:0] bp_update_pc;
+wire        bp_update_taken;
+wire [31:0] bp_update_target;
+wire [2:0]  bp_update_type;
+wire [15:0] bp_update_meta;
+wire        bp_update_was_predicted;
+wire        bp_update_mispredict;
 
-assign {br_stall, br_taken, br_target} = br_bus;
-assign redirect_valid = ertn_flush || flush || ibar_flush ||
-                        ex1_redirect_valid || br_taken;
-assign redirect_pc    = ertn_flush ? ertn_pc     :
-                        flush      ? ex_entry    :
-                        ibar_flush ? ibar_target :
-                        ex1_redirect_valid ? ex1_redirect_target :
-                                     br_target;
-assign redirect_cause = ertn_flush ? `REDIRECT_CAUSE_ERTN :
-                        flush      ? `REDIRECT_CAUSE_EXCP :
-                        ibar_flush ? `REDIRECT_CAUSE_IBAR :
-                                     `REDIRECT_CAUSE_BRANCH;
+assign redirect_pc = redirect_packet[`REDIRECT_TARGET_HI:`REDIRECT_TARGET_LO];
+assign redirect_cause = redirect_packet[`REDIRECT_REASON_HI:`REDIRECT_REASON_LO];
+assign redirect_seq_id = redirect_packet[`REDIRECT_SEQ_HI:`REDIRECT_SEQ_LO];
+assign redirect_epoch = redirect_packet[`REDIRECT_EPOCH_HI:`REDIRECT_EPOCH_LO];
+
+branch_resolve_register u_branch_resolve_register(
+    .clk(clk), .reset(reset),
+    .kill(flush || ertn_flush || ibar_flush),
+    .in_valid(ex1_redirect_valid), .in_target(ex1_redirect_target),
+    .in_seq_id(ex1_redirect_seq_id), .in_epoch(ex1_redirect_epoch),
+    .out_valid(branch_redirect_valid), .out_target(branch_redirect_target),
+    .out_seq_id(branch_redirect_seq_id), .out_epoch(branch_redirect_epoch)
+);
+
+redirect_register u_redirect_register(
+    .clk(clk), .reset(reset),
+    .branch_valid(branch_redirect_valid),
+    .branch_target(branch_redirect_target),
+    .branch_seq_id(branch_redirect_seq_id),
+    .branch_epoch(branch_redirect_epoch),
+    .ibar_valid(ibar_flush), .ibar_target(ibar_target),
+    .ibar_seq_id(commit_redirect_seq_id),
+    .ibar_epoch(commit_redirect_epoch),
+    .exception_valid(flush), .exception_target(ex_entry),
+    .exception_seq_id(commit_redirect_seq_id),
+    .exception_epoch(commit_redirect_epoch),
+    .ertn_valid(ertn_flush), .ertn_target(ertn_pc),
+    .ertn_seq_id(commit_redirect_seq_id),
+    .ertn_epoch(commit_redirect_epoch),
+    .redirect_valid(redirect_valid),
+    .redirect_packet(redirect_packet)
+);
 
 // csr hazard tracking
 wire        ex1_csr_we;
@@ -841,6 +902,21 @@ wire        ll_commit_valid;
 wire        sc_commit_valid;
 wire        local_store_commit_valid;
 wire [27:0] mem_commit_line;
+wire        wrong_epoch_drop_event;
+
+wire        predictor_lookup_hit;
+wire        predictor_lookup_taken;
+wire [31:0] predictor_lookup_target;
+wire [2:0]  predictor_lookup_type;
+wire [15:0] predictor_lookup_meta;
+wire [63:0] predictor_update_count;
+wire        fetch_pred_valid = (ENABLE_BP != 0) ? predictor_lookup_hit : 1'b1;
+wire        fetch_pred_taken = (ENABLE_BP != 0) ? predictor_lookup_taken : 1'b0;
+wire [31:0] fetch_pred_target = (ENABLE_BP != 0) ? predictor_lookup_target :
+                                                   (inst_vaddr + 32'd4);
+wire [2:0]  fetch_pred_type = (ENABLE_BP != 0) ? predictor_lookup_type :
+                                                 `PRED_TYPE_NONE;
+wire [15:0] fetch_pred_meta = (ENABLE_BP != 0) ? predictor_lookup_meta : 16'b0;
 
 wire [7:0] hw_int_in_safe;
 assign hw_int_in_safe = {
@@ -876,12 +952,29 @@ llsc_unit u_llsc_unit(
     .reservation_valid       (reservation_valid       )
 );
 
+branch_predictor u_branch_predictor(
+    .clk(clk), .reset(reset),
+    .lookup_valid(1'b1), .lookup_pc(inst_vaddr),
+    .lookup_epoch(current_fetch_epoch),
+    .lookup_hit(predictor_lookup_hit),
+    .lookup_taken(predictor_lookup_taken),
+    .lookup_target(predictor_lookup_target),
+    .lookup_type(predictor_lookup_type),
+    .lookup_meta(predictor_lookup_meta),
+    .update_valid(bp_update_valid), .update_pc(bp_update_pc),
+    .update_taken(bp_update_taken), .update_target(bp_update_target),
+    .update_type(bp_update_type), .update_meta(bp_update_meta),
+    .update_was_predicted(bp_update_was_predicted),
+    .update_mispredict(bp_update_mispredict),
+    .update_count(predictor_update_count)
+);
+
 // F0/F1: next-PC selection followed by the registered translation/request
 // descriptor boundary implemented inside if1_stage.
 if1_stage if1_stage(
     .clk                 (clk                 ),
     .reset               (reset               ),
-    .if2_allowin         (if2_allowin         ),
+    .if1_to_if2_ready    (if1_to_if2_ready    ),
     .redirect_valid      (redirect_valid      ),
     .redirect_pc         (redirect_pc         ),
     .redirect_cause      (redirect_cause      ),
@@ -891,6 +984,12 @@ if1_stage if1_stage(
     .inst_trans_ex       (inst_trans_ex       ),
     .inst_trans_ecode    (inst_trans_ecode    ),
     .inst_trans_esubcode (inst_trans_esubcode ),
+    .current_epoch       (current_fetch_epoch ),
+    .pred_valid          (fetch_pred_valid    ),
+    .pred_taken          (fetch_pred_taken    ),
+    .pred_target         (fetch_pred_target   ),
+    .pred_type           (fetch_pred_type     ),
+    .pred_meta           (fetch_pred_meta     ),
     .if1_to_if2_valid    (if1_to_if2_valid    ),
     .if1_to_if2_bus      (if1_to_if2_bus      ),
     .inst_sram_req       (inst_sram_req       ),
@@ -899,6 +998,8 @@ if1_stage if1_stage(
     .inst_sram_wstrb     (inst_sram_wstrb     ),
     .inst_sram_addr      (inst_sram_addr      ),
     .inst_sram_wdata     (inst_sram_wdata     ),
+    .inst_sram_req_pc    (inst_sram_req_pc    ),
+    .inst_sram_req_epoch (inst_sram_req_epoch ),
     .inst_sram_addr_ok   (inst_sram_addr_ok   )
 );
 
@@ -907,27 +1008,38 @@ if1_stage if1_stage(
 if2_stage if2_stage(
     .clk                 (clk                 ),
     .reset               (reset               ),
-    .ds_allowin          (fetch_queue_in_ready),
-    .if2_allowin         (if2_allowin         ),
+    .if2_to_queue_ready  (fetch_queue_in_ready),
+    .if1_to_if2_ready    (if1_to_if2_ready    ),
     .redirect            (redirect_valid      ),
+    .current_epoch       (current_fetch_epoch ),
     .if1_to_if2_valid    (if1_to_if2_valid    ),
     .if1_to_if2_bus      (if1_to_if2_bus      ),
-    .fs_to_ds_valid      (f2_to_fetch_queue_valid),
-    .fs_to_ds_bus        (f2_to_fetch_queue_bus),
+    .if2_to_queue_valid  (f2_to_fetch_queue_valid),
+    .if2_to_queue_packet (f2_to_fetch_queue_bus),
     .inst_sram_data_ok   (inst_sram_data_ok   ),
-    .inst_sram_rdata     (inst_sram_rdata     )
+    .inst_sram_resp_data (inst_sram_resp_data ),
+    .inst_sram_resp_pc   (inst_sram_resp_pc   ),
+    .inst_sram_resp_word_valid(inst_sram_resp_word_valid),
+    .inst_sram_resp_epoch(inst_sram_resp_epoch),
+    .wrong_epoch_drop    (wrong_epoch_drop_event)
 );
 
-fetch_queue #(.DEPTH(4), .PTR_W(2)) u_fetch_queue(
+fetch_packet_queue #(.DEPTH(4), .PTR_W(2)) u_fetch_queue(
     .clk          (clk                         ),
     .reset        (reset                       ),
     .flush        (redirect_valid              ),
     .in_valid     (f2_to_fetch_queue_valid     ),
     .in_ready     (fetch_queue_in_ready        ),
-    .in_packet    (f2_to_fetch_queue_bus       ),
-    .out_valid    (fetch_queue_to_decode_valid ),
-    .out_ready    (ds_allowin                  ),
-    .out_packet   (fetch_queue_to_decode_bus   ),
+    .slot0_in_valid(f2_to_fetch_queue_valid    ),
+    .slot0_in_packet(f2_to_fetch_queue_bus     ),
+    .slot1_in_valid(1'b0                       ),
+    .slot1_in_packet({`FS_TO_DS_BUS_WD{1'b0}}  ),
+    .out_valid    (fetch_queue_packet_valid    ),
+    .out_ready    (fetch_queue_to_decode_ready ),
+    .slot0_out_valid(fetch_queue_to_decode_valid),
+    .slot0_out_packet(fetch_queue_to_decode_bus),
+    .slot1_out_valid(fetch_queue_slot1_valid   ),
+    .slot1_out_packet(fetch_queue_slot1_bus    ),
     .occupancy    (fetch_queue_occupancy       )
 );
 
@@ -940,71 +1052,47 @@ id_stage id_stage(
     .reset          (reset          ),
     .flush          (flush          ),
     .ibar_flush     (ibar_flush     ),
-    .ex1_redirect   (ex1_redirect_valid),
-    //allowin
-    .es_allowin     (es_allowin     ),
-    .ds_allowin     (ds_allowin     ),
+    .ex1_redirect   (ex1_redirect_valid || branch_redirect_valid ||
+                     redirect_valid),
+    .ds_to_es_ready (decode_to_issue_ready[0]),
+    .fs_to_ds_ready (fetch_queue_to_decode_ready),
     //from fs
     .fs_to_ds_valid (fs_to_ds_valid ),
     .fs_to_ds_bus   (fs_to_ds_bus   ),
     //to es
     .ds_to_es_valid (ds_to_es_valid ),
     .ds_to_es_bus   (ds_to_es_bus   ),
-    //to fs
-    .br_bus         (br_bus         ),
     //to rf: for write back
     .ws_to_rf_bus   (ws_to_rf_bus   ),
-    .issue_to_ds_dest(issue_to_ds_dest),
-    .issue_csr_we   (issue_csr_we   ),
-    .issue_csr_num  (issue_csr_num  ),
-    .issue_is_ertn  (issue_is_ertn  ),
-    .issue_tlb_pending(issue_tlb_pending),
-    //hazard detect info
-    .ex1_to_ds_dest (ex1_to_ds_dest ),
-    .ex2_to_ds_dest (ex2_to_ds_dest ),
-    .ex3_to_ds_dest (ex3_to_ds_dest ),
-    .ms_to_ds_dest  (ms_to_ds_dest  ),
-    .ws_to_ds_dest  (ws_to_ds_dest  ),
-    .ex1_to_ds_result_ready(ex1_to_ds_result_ready),
-    .ex2_to_ds_result_ready(ex2_to_ds_result_ready),
-    .ex3_to_ds_result_ready(ex3_to_ds_result_ready),
-    .ms_to_ds_result_ready(ms_to_ds_result_ready),
-    .ws_to_ds_result_ready(ws_to_ds_result_ready),
-    .ex1_to_ds_result(ex1_to_ds_result),
-    .ex2_to_ds_result(ex2_to_ds_result),
-    .ex3_to_ds_result(ex3_to_ds_result),
-    .ms_to_ds_result(ms_to_ds_result),
-    .ws_to_ds_result(ws_to_ds_result),
-    // csr hazard tracking
-    .ex1_csr_we     (ex1_csr_we     ),
-    .ex1_csr_num    (ex1_csr_num    ),
-    .ex1_is_ertn    (ex1_is_ertn    ),
-    .ex2_csr_we     (ex2_csr_we     ),
-    .ex2_csr_num    (ex2_csr_num    ),
-    .ex2_is_ertn    (ex2_is_ertn    ),
-    .ex3_csr_we     (ex3_csr_we     ),
-    .ex3_csr_num    (ex3_csr_num    ),
-    .ex3_is_ertn    (ex3_is_ertn    ),
-    .ex1_tlb_pending(ex1_tlb_pending),
-    .ex2_tlb_pending(ex2_tlb_pending),
-    .ex3_tlb_pending(ex3_tlb_pending),
     .ertn_flush     (ertn_flush     )
 );
 
-assign decode_to_issue_valid = ds_to_es_valid;
-assign decode_to_issue_bus   = ds_to_es_bus;
+assign decode_to_issue_valid = {1'b0, ds_to_es_valid};
+assign decode_to_issue_bus   = {{`ID_TO_EX1_BUS_WD{1'b0}}, ds_to_es_bus};
+assign issue_lane_ready      = {1'b0, issue_to_ex1_ready};
 
 // Issue is lane-shaped from the outset; only lane0 is enabled in this phase.
 issue_stage issue_stage(
     .clk             (clk                    ),
     .reset           (reset                  ),
-    .kill            (flush || ertn_flush || ibar_flush || ex1_redirect_valid),
+    .kill            (flush || ertn_flush || ibar_flush ||
+                      ex1_redirect_valid || branch_redirect_valid ||
+                      redirect_valid),
     .decode_valid    (decode_to_issue_valid  ),
-    .decode_ready    (issue_decode_ready     ),
+    .decode_ready    (decode_to_issue_ready  ),
     .decode_packet   (decode_to_issue_bus    ),
-    .lane0_valid     (issue_lane0_valid      ),
-    .lane0_ready     (ex1_allowin            ),
-    .lane0_packet    (issue_lane0_bus        ),
+    .issue_lane_valid(issue_lane_valid       ),
+    .issue_lane_ready(issue_lane_ready       ),
+    .issue_lane_packet(issue_lane_bus        ),
+    .producer_set    ({wb_producer_packet, mem_producer_packet,
+                       ex3_producer_packet, ex2_producer_packet,
+                       ex1_producer_packet, {`PRODUCER_PACKET_WD{1'b0}}}),
+    .serialize_pending(ex1_csr_we || ex2_csr_we || ex3_csr_we ||
+                       ex1_is_ertn || ex2_is_ertn || ex3_is_ertn ||
+                       ex1_tlb_pending || ex2_tlb_pending || ex3_tlb_pending),
+    .producer_packet (issue_producer_packet  ),
+    .stall_data      (issue_stall_data       ),
+    .stall_struct    (issue_stall_struct     ),
     .pending_dst     (issue_to_ds_dest       ),
     .pending_csr_we  (issue_csr_we           ),
     .pending_csr_num (issue_csr_num          ),
@@ -1020,17 +1108,18 @@ ex1_stage ex1_stage(
     .ertn_flush     (ertn_flush     ),
     .ibar_flush     (ibar_flush     ),
     .ex2_empty      (ex2_empty      ),
-    .ex2_allowin    (ex2_allowin    ),
-    .ex1_allowin    (ex1_allowin    ),
+    .ex1_to_ex2_ready(ex1_to_ex2_ready),
+    .id_to_ex1_ready(issue_to_ex1_ready),
     .id_to_ex1_valid(id_to_ex1_valid),
     .id_to_ex1_bus  (id_to_ex1_bus  ),
     .ex1_to_ex2_valid(ex1_to_ex2_valid),
     .ex1_to_ex2_bus (ex1_to_ex2_bus ),
-    .ex1_to_ds_dest (ex1_to_ds_dest ),
-    .ex1_to_ds_result_ready(ex1_to_ds_result_ready),
-    .ex1_to_ds_result(ex1_to_ds_result),
+    .ex1_producer_packet(ex1_producer_packet),
+    .branch_resolve_fire(branch_resolve_fire),
     .ex1_redirect_valid(ex1_redirect_valid),
     .ex1_redirect_target(ex1_redirect_target),
+    .ex1_redirect_seq_id(ex1_redirect_seq_id),
+    .ex1_redirect_epoch(ex1_redirect_epoch),
     .ex1_csr_we     (ex1_csr_we     ),
     .ex1_csr_num    (ex1_csr_num    ),
     .ex1_is_ertn    (ex1_is_ertn    ),
@@ -1041,11 +1130,10 @@ ex1_stage ex1_stage(
 ex2_stage ex2_stage(
     .clk            (clk            ),
     .reset          (reset          ),
-    //allowin
-    .ex3_allowin    (ex3_allowin    ),
+    .ex2_to_ex3_ready(ex2_to_ex3_ready),
     .older_pipe_empty(ex3_empty && ms_empty && ws_empty),
     .priv_commit_bus(priv_commit_bus),
-    .ex2_allowin    (ex2_allowin    ),
+    .ex1_to_ex2_ready(ex1_to_ex2_ready),
     .ex2_empty      (ex2_empty      ),
     .ex2_tlb_pending(ex2_tlb_pending),
     //from ex1
@@ -1078,10 +1166,7 @@ ex2_stage ex2_stage(
     .ibar_flush       (ibar_flush       ),
     .ibar_target      (),
     .idle_wait        (),
-    // hazard detect info
-    .es_to_ds_dest  (ex2_to_ds_dest ),
-    .es_to_ds_result_ready(ex2_to_ds_result_ready),
-    .es_to_ds_result(ex2_to_ds_result),
+    .ex2_producer_packet(ex2_producer_packet),
     // exception interface
     .flush          (flush          ),
     .ex3_wb_ex      (ex3_wb_ex      ),
@@ -1122,9 +1207,9 @@ ex2_stage ex2_stage(
 ex3_stage ex3_stage(
     .clk            (clk            ),
     .reset          (reset          ),
-    .ms_allowin     (ms_allowin     ),
+    .ex3_to_mem_ready(ex3_to_mem_ready),
     .older_pipe_empty(ms_empty && ws_empty),
-    .ex3_allowin    (ex3_allowin    ),
+    .ex2_to_ex3_ready(ex2_to_ex3_ready),
     .ex3_empty      (ex3_empty      ),
     .ex2_to_ex3_valid(ex2_to_ex3_valid),
     .ex2_to_ex3_bus (ex2_to_ex3_bus ),
@@ -1153,9 +1238,10 @@ ex3_stage ex3_stage(
     .ibar_flush       (ibar_flush       ),
     .ibar_target      (ibar_target      ),
     .idle_wait        (idle_wait        ),
-    .ex3_to_ds_dest   (ex3_to_ds_dest   ),
-    .ex3_to_ds_result_ready(ex3_to_ds_result_ready),
-    .ex3_to_ds_result (ex3_to_ds_result ),
+    .ex3_producer_packet(ex3_producer_packet),
+    .commit_lane_valid(commit_lane_valid),
+    .commit_lane_seq_id(commit_lane_seq_id),
+    .commit_lane_id(commit_lane_id),
     .flush            (flush            ),
     .ex_entry_in      (ex_entry_from_ex2 ),
     .ex_entry         (ex_entry         ),
@@ -1167,6 +1253,8 @@ ex3_stage ex3_stage(
     .ertn_flush       (ertn_flush       ),
     .ertn_pc_in       (ertn_pc_from_ex2  ),
     .ertn_pc          (ertn_pc          ),
+    .redirect_seq_id  (commit_redirect_seq_id),
+    .redirect_epoch   (commit_redirect_epoch),
     .ex3_csr_we       (ex3_csr_we       ),
     .ex3_csr_num      (ex3_csr_num      ),
     .ex3_is_ertn      (ex3_is_ertn      ),
@@ -1178,20 +1266,27 @@ ex3_stage ex3_stage(
     .sc_query_cached  (sc_query_cached  ),
     .sc_can_store     (sc_can_store     ),
     .priv_commit_bus  (priv_commit_bus  ),
-    .ex3_tlb_pending  (ex3_tlb_pending  )
+    .ex3_tlb_pending  (ex3_tlb_pending  ),
+    .bp_update_valid  (bp_update_valid  ),
+    .bp_update_pc     (bp_update_pc     ),
+    .bp_update_taken  (bp_update_taken  ),
+    .bp_update_target (bp_update_target ),
+    .bp_update_type   (bp_update_type   ),
+    .bp_update_meta   (bp_update_meta   ),
+    .bp_update_was_predicted(bp_update_was_predicted),
+    .bp_update_mispredict(bp_update_mispredict)
 );
 
 // MEM stage
 mem_stage mem_stage(
     .clk            (clk            ),
     .reset          (reset          ),
-    //allowin
-    .ws_allowin     (ws_allowin     ),
-    .ms_allowin     (ms_allowin     ),
+    .ms_to_ws_ready (mem_to_wb_ready),
+    .ex3_to_mem_ready(ex3_to_mem_ready),
     .ms_empty       (ms_empty       ),
-    //from es
-    .es_to_ms_valid (es_to_ms_valid ),
-    .es_to_ms_bus   (es_to_ms_bus   ),
+    // from Commit/EX3
+    .ex3_to_mem_valid(ex3_to_mem_valid),
+    .ex3_to_mem_bus (ex3_to_mem_bus ),
     //to ws
     .ms_to_ws_valid (ms_to_ws_valid ),
     .ms_to_ws_bus   (ms_to_ws_bus   ),
@@ -1202,34 +1297,105 @@ mem_stage mem_stage(
     .sc_commit_valid(sc_commit_valid),
     .local_store_commit_valid(local_store_commit_valid),
     .mem_commit_line(mem_commit_line),
-    // hazard detect info
-    .ms_to_ds_dest  (ms_to_ds_dest  ),
-    .ms_to_ds_result_ready(ms_to_ds_result_ready),
-    .ms_to_ds_result(ms_to_ds_result)
+    .mem_producer_packet(mem_producer_packet)
 );
 
 // WB stage
 wb_stage wb_stage(
     .clk            (clk            ),
     .reset          (reset          ),
-    //allowin
-    .ws_allowin     (ws_allowin     ),
+    .ms_to_ws_ready (mem_to_wb_ready),
     .ws_empty       (ws_empty       ),
     //from ms
     .ms_to_ws_valid (ms_to_ws_valid ),
     .ms_to_ws_bus   (ms_to_ws_bus   ),
     //to rf: for write back
     .ws_to_rf_bus   (ws_to_rf_bus   ),
-    // hazard detect info
-    .ws_to_ds_dest  (ws_to_ds_dest  ),
-    .ws_to_ds_result_ready(ws_to_ds_result_ready),
-    .ws_to_ds_result(ws_to_ds_result),
+    .wb_producer_packet(wb_producer_packet),
     // trace debug interface
     .debug_wb_pc      (debug_wb_pc      ),
     .debug_wb_rf_we   (debug_wb_rf_we   ),
     .debug_wb_rf_wnum (debug_wb_rf_wnum ),
     .debug_wb_rf_wdata(debug_wb_rf_wdata)
 );
+
+// Baseline performance counters.  They are intentionally kept inside
+// mycpu_core so simulation, ILA or a later CSR mapping can observe the same
+// definitions without changing the architectural interface.
+(* keep = "true" *) reg [63:0] cycle_count;
+(* keep = "true" *) reg [63:0] commit_count;
+(* keep = "true" *) reg [63:0] frontend_empty_cycles;
+(* keep = "true" *) reg [63:0] fetch_queue_full_cycles;
+(* keep = "true" *) reg [63:0] issue_stall_data_cycles;
+(* keep = "true" *) reg [63:0] issue_stall_struct_cycles;
+(* keep = "true" *) reg [63:0] branch_count;
+(* keep = "true" *) reg [63:0] mispredict_count;
+(* keep = "true" *) reg [63:0] icache_miss_count;
+(* keep = "true" *) reg [63:0] dcache_miss_count;
+(* keep = "true" *) reg [63:0] fetch_request_count;
+(* keep = "true" *) reg [63:0] fetch_response_count;
+(* keep = "true" *) reg [63:0] redirect_count;
+(* keep = "true" *) reg [63:0] wrong_epoch_drop_count;
+(* keep = "true" *) reg [63:0] bp_update_count;
+// Register cache events before the wide counters.  This prevents synthesis
+// from sharing the 64-bit increment enable with the cache hit/LRU cone.
+reg icache_miss_event_d;
+reg dcache_miss_event_d;
+
+always @(posedge clk) begin
+    if (reset) begin
+        cycle_count              <= 64'b0;
+        commit_count             <= 64'b0;
+        frontend_empty_cycles    <= 64'b0;
+        fetch_queue_full_cycles  <= 64'b0;
+        issue_stall_data_cycles  <= 64'b0;
+        issue_stall_struct_cycles<= 64'b0;
+        branch_count             <= 64'b0;
+        mispredict_count         <= 64'b0;
+        icache_miss_count        <= 64'b0;
+        dcache_miss_count        <= 64'b0;
+        fetch_request_count      <= 64'b0;
+        fetch_response_count     <= 64'b0;
+        redirect_count           <= 64'b0;
+        wrong_epoch_drop_count   <= 64'b0;
+        bp_update_count          <= 64'b0;
+        icache_miss_event_d      <= 1'b0;
+        dcache_miss_event_d      <= 1'b0;
+    end
+    else begin
+        icache_miss_event_d <= icache_miss_event;
+        dcache_miss_event_d <= dcache_miss_event;
+        cycle_count <= cycle_count + 64'd1;
+        if (!ws_empty)
+            commit_count <= commit_count + 64'd1;
+        if (!fetch_queue_to_decode_valid)
+            frontend_empty_cycles <= frontend_empty_cycles + 64'd1;
+        if (fetch_queue_occupancy == 3'd4)
+            fetch_queue_full_cycles <= fetch_queue_full_cycles + 64'd1;
+        if (issue_stall_data)
+            issue_stall_data_cycles <= issue_stall_data_cycles + 64'd1;
+        if (issue_stall_struct)
+            issue_stall_struct_cycles <= issue_stall_struct_cycles + 64'd1;
+        if (branch_resolve_fire)
+            branch_count <= branch_count + 64'd1;
+        if (ex1_redirect_valid)
+            mispredict_count <= mispredict_count + 64'd1;
+        if (icache_miss_event_d)
+            icache_miss_count <= icache_miss_count + 64'd1;
+        if (dcache_miss_event_d)
+            dcache_miss_count <= dcache_miss_count + 64'd1;
+        if (inst_sram_req && inst_sram_addr_ok)
+            fetch_request_count <= fetch_request_count + 64'd1;
+        if (inst_sram_data_ok)
+            fetch_response_count <= fetch_response_count + 64'd1;
+        if (redirect_valid)
+            redirect_count <= redirect_count + 64'd1;
+        if (wrong_epoch_drop_event)
+            wrong_epoch_drop_count <= wrong_epoch_drop_count + 64'd1;
+        if (bp_update_valid)
+            bp_update_count <= bp_update_count + 64'd1;
+    end
+end
 
 `ifdef SIMU
 // Keep the instruction and side-effect information beside the normal
@@ -1432,7 +1598,7 @@ always @(posedge clk) begin
         diff_load_vaddr        <= 32'b0;
     end
     else begin
-        if (ex3_to_mem_valid && ms_allowin) begin
+        if (ex3_to_mem_valid && ex3_to_mem_ready) begin
             diff_ms_valid         <= 1'b1;
             diff_ms_instr         <= diff_ex2_current_instr;
             diff_ms_paddr         <= ex3_stage.data_paddr;
@@ -1453,11 +1619,11 @@ always @(posedge clk) begin
                                      (ex3_stage.csr_num == 14'h005);
             diff_ms_csr_data      <= ex3_stage.csr_rvalue;
         end
-        else if (ms_allowin) begin
+        else if (ex3_to_mem_ready) begin
             diff_ms_valid         <= 1'b0;
         end
 
-        if (ms_to_ws_valid && ws_allowin) begin
+        if (ms_to_ws_valid && mem_to_wb_ready) begin
             diff_ws_valid         <= diff_ms_valid;
             diff_ws_instr         <= diff_ms_instr;
             diff_ws_paddr         <= diff_ms_paddr;
@@ -1478,7 +1644,7 @@ always @(posedge clk) begin
             diff_ws_llbctl        <= {diff_llbctl_klo_after_mem, 1'b0,
                                       diff_reservation_valid_after_mem};
         end
-        else if (ws_allowin) begin
+        else if (mem_to_wb_ready) begin
             diff_ws_valid         <= 1'b0;
         end
 

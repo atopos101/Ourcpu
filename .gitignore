@@ -4,6 +4,9 @@ output/
 LoongArch-Vol1-v1.10-CN.pdf
 .codeartsdoer/
 .arts/
+.Xil/
 .agents/
 tests/
-分支预测与顺序双发射前置架构改造指导书.md
+configure_soc_cpu_ooc.tcl
+synth_cpu_ooc.tcl
+SYNTHESIS.md

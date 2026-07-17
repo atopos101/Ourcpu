@@ -1,3 +1,5 @@
+`timescale 1ns/1ps
+`default_nettype none
 module barrier_ctrl (
     input  wire       clk,
     input  wire       reset,

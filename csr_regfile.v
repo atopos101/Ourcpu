@@ -1,3 +1,5 @@
+`timescale 1ns/1ps
+`default_nettype wire
 `include "mycpu.vh"
 
 module csr_regfile(

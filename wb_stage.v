@@ -1,10 +1,12 @@
+`timescale 1ns/1ps
+`default_nettype none
 `include "mycpu.vh"
 
 module wb_stage(
     input  wire                     clk           ,
     input  wire                     reset         ,
-    //allowin
-    output wire                     ws_allowin    ,
+    // valid/ready pipeline handshake; WB always retires in one cycle
+    output wire                     ms_to_ws_ready,
     output wire                     ws_empty      ,
     //from ms
     input  wire                     ms_to_ws_valid,
@@ -16,22 +18,21 @@ module wb_stage(
     output wire [ 3:0] debug_wb_rf_we  ,
     output wire [ 4:0] debug_wb_rf_wnum,
     output wire [31:0] debug_wb_rf_wdata,
-    // 写回级目的操作数寄存器号
-    output wire [4:0] ws_to_ds_dest,
-    output wire       ws_to_ds_result_ready,
-    // 数据前递
-    output wire [31:0] ws_to_ds_result
+    output wire [`PRODUCER_PACKET_WD-1:0] wb_producer_packet
 );
 
 reg         ws_valid;
-wire        ws_ready_go;
 
 reg [`MS_TO_WS_BUS_WD -1:0] ms_to_ws_bus_r;
 wire        ws_gr_we;
 wire [ 4:0] ws_dest;
 wire [31:0] ws_final_result;
 wire [31:0] ws_pc;
-assign {ws_gr_we       ,  //69:69
+wire [31:0] ws_seq_id;
+wire        ws_lane_id;
+assign {ws_seq_id,
+        ws_lane_id,
+        ws_gr_we       ,  //69:69
         ws_dest        ,  //68:64
         ws_final_result,  //63:32
         ws_pc             //31:0
@@ -48,23 +49,24 @@ assign ws_to_rf_bus = {rf_we   ,  //37:37
                        rf_wdata   //31:0
                       };
 
-assign ws_ready_go = 1'b1;
-assign ws_allowin  = !ws_valid || ws_ready_go;
+wire ws_out_fire = ws_valid;
+wire ws_in_fire  = ms_to_ws_valid && ms_to_ws_ready;
+assign ms_to_ws_ready = 1'b1;
 assign ws_empty    = !ws_valid;
 always @(posedge clk) begin
     if (reset) begin
         ws_valid <= 1'b0;
     end
-    else if (ws_allowin) begin
+    else if (ms_to_ws_ready) begin
         ws_valid <= ms_to_ws_valid;
     end
 
-    if (ms_to_ws_valid && ws_allowin) begin
+    if (ws_in_fire) begin
         ms_to_ws_bus_r <= ms_to_ws_bus;
     end
 end
 
-assign rf_we    = ws_gr_we && ws_valid;
+assign rf_we    = ws_gr_we && ws_out_fire;
 assign rf_waddr = ws_dest;
 assign rf_wdata = ws_final_result;
 
@@ -86,8 +88,19 @@ assign debug_wb_rf_we    = ws_debug_valid ? {4{rf_we}}      : 4'b0;
 assign debug_wb_rf_wnum  = ws_debug_valid ? ws_dest         : 5'b0;
 assign debug_wb_rf_wdata = ws_debug_valid ? ws_final_result : 32'b0;
 
-assign ws_to_ds_dest = ws_dest & {5{ws_valid}} & {5{ws_gr_we}};
-assign ws_to_ds_result_ready = ws_valid && ws_gr_we;
-assign ws_to_ds_result = ws_final_result;
+producer_packet_pack u_wb_producer_packet(
+    .valid(ws_valid), .seq_id(ws_seq_id), .dst_valid(ws_gr_we), .dst(ws_dest),
+    .value_valid(ws_valid && ws_gr_we), .value(ws_final_result),
+    .packet(wb_producer_packet)
+);
+
+wire unused_ws_out_fire = ws_out_fire;
+
+`ifndef SYNTHESIS
+always @(posedge clk) begin
+    if (!reset && rf_we && !ws_out_fire)
+        $error("GPR write fired without WB commit_fire");
+end
+`endif
 
 endmodule

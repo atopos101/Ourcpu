@@ -1,3 +1,5 @@
+`timescale 1ns/1ps
+`default_nettype none
 module decoder_4_16(
     input  wire [ 3:0] in,
     output wire [15:0] out

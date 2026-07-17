@@ -1,3 +1,5 @@
+`timescale 1ns/1ps
+`default_nettype wire
 `include "mycpu.vh"
 
 module id_stage(
@@ -6,71 +8,36 @@ module id_stage(
     input                          flush         ,
     input                          ibar_flush    ,
     input                          ex1_redirect  ,
-    //allowin
-    input                          es_allowin    ,
-    output                         ds_allowin    ,
+    // valid/ready pipeline handshake
+    input                          ds_to_es_ready,
+    output                         fs_to_ds_ready,
     //from fs
     input                          fs_to_ds_valid,
     input  [`FS_TO_DS_BUS_WD -1:0] fs_to_ds_bus  ,
     //to es
     output                         ds_to_es_valid,
     output [`DS_TO_ES_BUS_WD -1:0] ds_to_es_bus  ,
-    //to fs
-    output [`BR_BUS_WD       -1:0] br_bus        ,
     //to rf: for write back
     input  [`WS_TO_RF_BUS_WD -1:0] ws_to_rf_bus  ,
-    // instruction waiting at the lane-0 Issue boundary
-    input [4:0] issue_to_ds_dest,
-    input       issue_csr_we,
-    input [13:0] issue_csr_num,
-    input       issue_is_ertn,
-    input       issue_tlb_pending,
-    // hazard detect
-    input [4:0] ex1_to_ds_dest,
-    input [4:0] ex2_to_ds_dest,
-    input [4:0] ex3_to_ds_dest,
-    input [4:0] ms_to_ds_dest,
-    input [4:0] ws_to_ds_dest,
-    input       ex1_to_ds_result_ready,
-    input       ex2_to_ds_result_ready,
-    input       ex3_to_ds_result_ready,
-    input       ms_to_ds_result_ready,
-    input       ws_to_ds_result_ready,
-    input [31:0] ex1_to_ds_result,
-    input [31:0] ex2_to_ds_result,
-    input [31:0] ex3_to_ds_result,
-    input [31:0] ms_to_ds_result,
-    input [31:0] ws_to_ds_result,
-    // csr hazard tracking from EX1/EX2/EX3
-    input        ex1_csr_we,
-    input [13:0] ex1_csr_num,
-    input        ex1_is_ertn,
-    input        ex2_csr_we,
-    input [13:0] ex2_csr_num,
-    input        ex2_is_ertn,
-    input        ex3_csr_we,
-    input [13:0] ex3_csr_num,
-    input        ex3_is_ertn,
-    input        ex1_tlb_pending,
-    input        ex2_tlb_pending,
-    input        ex3_tlb_pending,
     // ertn flush
     input        ertn_flush
 );
-
-wire        br_taken_raw;
-wire [31:0] br_target_raw;
-reg         br_redirect_valid_r;
-reg  [31:0] br_redirect_target_r;
 
 wire [31:0] ds_pc;
 wire [31:0] ds_inst;
 wire        fs_ex;        // fetch exception from IF stage
 wire [ 5:0] fs_ecode;
 wire [ 8:0] fs_esubcode;
+wire [`FETCH_EPOCH_WD-1:0] fs_epoch;
+wire [31:0] fs_pc_next;
+wire        fs_pred_valid;
+wire        fs_pred_taken;
+wire [31:0] fs_pred_target;
+wire [2:0]  fs_pred_type;
+wire [15:0] fs_pred_meta;
 
 reg         ds_valid   ;
-wire        ds_ready_go;
+wire        ds_operation_ready;
 
 wire [18:0] alu_op;
 
@@ -90,8 +57,6 @@ wire [4: 0] dest;
 wire [31:0] rj_value;
 wire [31:0] rkd_value;
 wire [31:0] imm;
-wire [31:0] br_offs;
-wire [31:0] jirl_offs;
 
 wire [ 5:0] op_31_26;
 wire [ 3:0] op_25_22;
@@ -102,8 +67,6 @@ wire [ 4:0] rj;
 wire [ 4:0] rk;
 wire [11:0] i12;
 wire [19:0] i20;
-wire [15:0] i16;
-wire [25:0] i26;
 wire [13:0] si14;
 
 wire [63:0] op_31_26_d;
@@ -166,9 +129,7 @@ wire        inst_mod_wu;
 wire        need_ui5;
 wire        need_si12;
 wire        need_ui12;
-wire        need_si16;
 wire        need_si20;
-wire        need_si26;
 wire        src2_is_4;
 
 wire [ 4:0] rf_raddr1;
@@ -192,15 +153,6 @@ wire inst_no_dest;
 wire src_no_rj;
 wire src_no_rk;
 wire src_no_rd;
-wire rj_wait;
-wire rk_wait;
-wire rd_wait;
-
-wire br_stall;
-wire producer_not_ready_stall;
-wire rj_eq_rd;
-wire rj_lt_rd;
-wire rj_ltu_rd;
 
 assign op_31_26  = ds_inst[31:26];
 assign op_25_22  = ds_inst[25:22];
@@ -213,8 +165,6 @@ assign rk   = ds_inst[14:10];
 
 assign i12  = ds_inst[21:10];
 assign i20  = ds_inst[24: 5];
-assign i16  = ds_inst[25:10];
-assign i26  = {ds_inst[ 9: 0], ds_inst[25:10]};
 assign si14 = ds_inst[23:10];
 
 decoder_6_64 u_dec0(.in(op_31_26 ), .out(op_31_26_d ));
@@ -445,9 +395,7 @@ assign alu_op[18] = inst_mod_wu;
 assign need_ui5   = inst_slli_w | inst_srli_w | inst_srai_w;
 assign need_si12  = inst_addi_w | load_op | store_op | inst_cacop | inst_slti | inst_sltui;
 assign need_ui12  = inst_andi | inst_ori | inst_xori;
-assign need_si16  = inst_jirl | branch_op;
 assign need_si20  = inst_lu12i_w | inst_pcaddu12i;
-assign need_si26  = inst_b | inst_bl;
 assign src2_is_4  = inst_jirl | inst_bl;
 
 assign imm = src2_is_4 ? 32'h4                      :
@@ -456,11 +404,6 @@ assign imm = src2_is_4 ? 32'h4                      :
              (inst_ll_w | inst_sc_w)
                        ? {{16{si14[13]}}, si14, 2'b0} :
             /*need_si12*/{{20{i12[11]}}, i12[11:0]} ;
-
-assign br_offs = need_si26 ? {{ 4{i26[25]}}, i26[25:0], 2'b0} :
-                              {{14{i16[15]}}, i16[15:0], 2'b0} ;
-
-assign jirl_offs = {{14{i16[15]}}, i16[15:0], 2'b0};
 
 assign src_reg_is_rd = branch_op | store_op | inst_csrwr | inst_csrxchg;
 
@@ -503,97 +446,20 @@ assign dest  = dst_is_r1    ? 5'd1 :
 assign rf_raddr1 = rj;
 assign rf_raddr2 = src_reg_is_rd ? rd : rk;
 
-regfile u_regfile(
-    .clk    (clk      ),
-    .raddr1 (rf_raddr1),
-    .rdata1 (rf_rdata1),
-    .raddr2 (rf_raddr2),
-    .rdata2 (rf_rdata2),
-    .we     (rf_we    ),
-    .waddr  (rf_waddr ),
-    .wdata  (rf_wdata )
+regfile_lane_wrapper u_regfile(
+    .clk          (clk       ),
+    .lane0_raddr0(rf_raddr1 ), .lane0_rdata0(rf_rdata1),
+    .lane0_raddr1(rf_raddr2 ), .lane0_rdata1(rf_rdata2),
+    .lane1_raddr0(5'b0      ), .lane1_rdata0(),
+    .lane1_raddr1(5'b0      ), .lane1_rdata1(),
+    .wb0_valid    (rf_we     ), .wb0_addr(rf_waddr), .wb0_data(rf_wdata),
+    .wb1_valid    (1'b0      ), .wb1_addr(5'b0), .wb1_data(32'b0)
     );
-
-wire rj_hit_issue = ~src_no_rj && (rj != 5'b00000) && (rj == issue_to_ds_dest);
-wire rj_hit_ex1 = ~src_no_rj && (rj != 5'b00000) && (rj == ex1_to_ds_dest);
-wire rj_hit_ex2 = ~src_no_rj && (rj != 5'b00000) && (rj == ex2_to_ds_dest);
-wire rj_hit_ex3 = ~src_no_rj && (rj != 5'b00000) && (rj == ex3_to_ds_dest);
-wire rj_hit_ms  = ~src_no_rj && (rj != 5'b00000) && (rj == ms_to_ds_dest);
-wire rj_hit_ws  = ~src_no_rj && (rj != 5'b00000) && (rj == ws_to_ds_dest);
-wire rk_hit_issue = ~src_no_rk && (rk != 5'b00000) && (rk == issue_to_ds_dest);
-wire rk_hit_ex1 = ~src_no_rk && (rk != 5'b00000) && (rk == ex1_to_ds_dest);
-wire rk_hit_ex2 = ~src_no_rk && (rk != 5'b00000) && (rk == ex2_to_ds_dest);
-wire rk_hit_ex3 = ~src_no_rk && (rk != 5'b00000) && (rk == ex3_to_ds_dest);
-wire rk_hit_ms  = ~src_no_rk && (rk != 5'b00000) && (rk == ms_to_ds_dest);
-wire rk_hit_ws  = ~src_no_rk && (rk != 5'b00000) && (rk == ws_to_ds_dest);
-wire rd_hit_issue = ~src_no_rd && (rd != 5'b00000) && (rd == issue_to_ds_dest);
-wire rd_hit_ex1 = ~src_no_rd && (rd != 5'b00000) && (rd == ex1_to_ds_dest);
-wire rd_hit_ex2 = ~src_no_rd && (rd != 5'b00000) && (rd == ex2_to_ds_dest);
-wire rd_hit_ex3 = ~src_no_rd && (rd != 5'b00000) && (rd == ex3_to_ds_dest);
-wire rd_hit_ms  = ~src_no_rd && (rd != 5'b00000) && (rd == ms_to_ds_dest);
-wire rd_hit_ws  = ~src_no_rd && (rd != 5'b00000) && (rd == ws_to_ds_dest);
-
-// Control flow explicitly waits across EX1/MEM below.  Keep those late data
-// values out of the ID operand mux as well, so STA does not retain an
-// unsensitizable ALU/AXI-to-branch path through the forwarding network.
-wire control_flow_op = branch_op || inst_jirl;
-wire rj_fwd_ex1 = rj_hit_ex1 && ex1_to_ds_result_ready && !control_flow_op;
-wire rj_fwd_ex2 = rj_hit_ex2 && ex2_to_ds_result_ready;
-wire rj_fwd_ex3 = rj_hit_ex3 && ex3_to_ds_result_ready;
-wire rj_fwd_ms  = rj_hit_ms  && ms_to_ds_result_ready && !control_flow_op;
-wire rj_fwd_ws  = rj_hit_ws  && ws_to_ds_result_ready;
-wire rk_fwd_ex1 = rk_hit_ex1 && ex1_to_ds_result_ready;
-wire rk_fwd_ex2 = rk_hit_ex2 && ex2_to_ds_result_ready;
-wire rk_fwd_ex3 = rk_hit_ex3 && ex3_to_ds_result_ready;
-wire rk_fwd_ms  = rk_hit_ms  && ms_to_ds_result_ready;
-wire rk_fwd_ws  = rk_hit_ws  && ws_to_ds_result_ready;
-wire rd_fwd_ex1 = rd_hit_ex1 && ex1_to_ds_result_ready && !branch_op;
-wire rd_fwd_ex2 = rd_hit_ex2 && ex2_to_ds_result_ready;
-wire rd_fwd_ex3 = rd_hit_ex3 && ex3_to_ds_result_ready;
-wire rd_fwd_ms  = rd_hit_ms  && ms_to_ds_result_ready && !branch_op;
-wire rd_fwd_ws  = rd_hit_ws  && ws_to_ds_result_ready;
-
-wire [31:0] rj_forward_result = rj_fwd_ex1 ? ex1_to_ds_result :
-                                rj_fwd_ex2 ? ex2_to_ds_result :
-                                rj_fwd_ex3 ? ex3_to_ds_result :
-                                rj_fwd_ms  ? ms_to_ds_result  :
-                                rj_fwd_ws  ? ws_to_ds_result  :
-                                             rf_rdata1;
-wire [31:0] rk_forward_result = rk_fwd_ex1 ? ex1_to_ds_result :
-                                rk_fwd_ex2 ? ex2_to_ds_result :
-                                rk_fwd_ex3 ? ex3_to_ds_result :
-                                rk_fwd_ms  ? ms_to_ds_result  :
-                                rk_fwd_ws  ? ws_to_ds_result  :
-                                             rf_rdata2;
-wire [31:0] rd_forward_result = rd_fwd_ex1 ? ex1_to_ds_result :
-                                rd_fwd_ex2 ? ex2_to_ds_result :
-                                rd_fwd_ex3 ? ex3_to_ds_result :
-                                rd_fwd_ms  ? ms_to_ds_result  :
-                                rd_fwd_ws  ? ws_to_ds_result  :
-                                             rf_rdata2;
-
-assign rj_value  = rj_wait ? rj_forward_result : rf_rdata1;
-assign rkd_value = rk_wait ? rk_forward_result :
-                   rd_wait ? rd_forward_result :
-                   rf_rdata2;
-
-// ============================================================
-// Branch logic
-// ============================================================
-assign rj_eq_rd  = (rj_value == rkd_value);
-assign rj_lt_rd  = ($signed(rj_value) < $signed(rkd_value));
-assign rj_ltu_rd = (rj_value < rkd_value);
-
-assign br_taken_raw = (   inst_beq  &&  rj_eq_rd
-                   || inst_bne  && !rj_eq_rd
-                   || inst_blt  &&  rj_lt_rd
-                   || inst_bge  && !rj_lt_rd
-                   || inst_bltu &&  rj_ltu_rd
-                   || inst_bgeu && !rj_ltu_rd
-                   || inst_bl
-                   || inst_b
-                  ) && ds_ready_go && es_allowin && (fs_ex !== 1'b1);
-
+// Decode captures the register-file snapshot and source descriptors only.
+// The Issue stage resolves the newest producer and overwrites these operand
+// fields immediately before issue.
+assign rj_value  = rf_rdata1;
+assign rkd_value = rf_rdata2;
 assign inst_no_dest = (store_op & ~inst_sc_w) | inst_preld | inst_b | branch_op | inst_tlbsrch | inst_tlbrd
                       | inst_tlbwr | inst_tlbfill | inst_invtlb_base | inst_cacop
                       | inst_dbar | inst_ibar | inst_idle;
@@ -615,111 +481,6 @@ assign src_no_rk = inst_slli_w | inst_srli_w | inst_srai_w | inst_addi_w | load_
                    | inst_dbar | inst_ibar | inst_idle;
 assign src_no_rd = inst_dbar | inst_ibar | inst_idle |
                    (~store_op & ~branch_op & ~inst_csrwr & ~inst_csrxchg);
-
-assign rj_wait = rj_hit_issue || rj_hit_ex1 || rj_hit_ex2 || rj_hit_ex3 || rj_hit_ms || rj_hit_ws;
-assign rk_wait = rk_hit_issue || rk_hit_ex1 || rk_hit_ex2 || rk_hit_ex3 || rk_hit_ms || rk_hit_ws;
-assign rd_wait = rd_hit_issue || rd_hit_ex1 || rd_hit_ex2 || rd_hit_ex3 || rd_hit_ms || rd_hit_ws;
-
-assign br_target_raw = (branch_op || inst_bl || inst_b) ? (ds_pc + br_offs) :
-                                                       /*inst_jirl*/ (rj_value + jirl_offs);
-
-wire rj_not_ready = rj_hit_issue ? 1'b1 :
-                    rj_hit_ex1 ? (!control_flow_op && !ex1_to_ds_result_ready) :
-                    rj_hit_ex2 ? !ex2_to_ds_result_ready :
-                    rj_hit_ex3 ? !ex3_to_ds_result_ready :
-                    rj_hit_ms  ? (!control_flow_op && !ms_to_ds_result_ready) :
-                    rj_hit_ws  ? !ws_to_ds_result_ready  : 1'b0;
-wire rk_not_ready = rk_hit_issue ? 1'b1 :
-                    rk_hit_ex1 ? !ex1_to_ds_result_ready :
-                    rk_hit_ex2 ? !ex2_to_ds_result_ready :
-                    rk_hit_ex3 ? !ex3_to_ds_result_ready :
-                    rk_hit_ms  ? !ms_to_ds_result_ready  :
-                    rk_hit_ws  ? !ws_to_ds_result_ready  : 1'b0;
-wire rd_not_ready = rd_hit_issue ? 1'b1 :
-                    rd_hit_ex1 ? (!branch_op && !ex1_to_ds_result_ready) :
-                    rd_hit_ex2 ? !ex2_to_ds_result_ready :
-                    rd_hit_ex3 ? !ex3_to_ds_result_ready :
-                    rd_hit_ms  ? (!branch_op && !ms_to_ds_result_ready) :
-                    rd_hit_ws  ? !ws_to_ds_result_ready  : 1'b0;
-
-// EX1 ALU results and MEM results that become valid from an AXI response can
-// arrive late in the cycle.  Do not let either same-cycle value feed a
-// control-flow comparison/target and then return to IF1.  Wait for the next
-// registered forwarding stage, at a one-cycle cost only for these dependencies.
-wire control_flow_ex1_stall = (branch_op && (rj_hit_ex1 || rd_hit_ex1)) ||
-                              (inst_jirl && rj_hit_ex1);
-wire control_flow_ms_stall  = (branch_op && (rj_hit_ms || rd_hit_ms)) ||
-                              (inst_jirl && rj_hit_ms);
-
-assign producer_not_ready_stall = rj_not_ready || rk_not_ready || rd_not_ready ||
-                                  control_flow_ex1_stall || control_flow_ms_stall;
-assign br_stall = producer_not_ready_stall & br_taken_raw & ds_valid;
-assign br_bus = {br_stall, br_redirect_valid_r, br_redirect_target_r};
-
-// ============================================================
-// CSR hazard detection — writer monitor
-// ============================================================
-localparam CSR_CRMD_NO  = 14'h00;
-localparam CSR_PRMD_NO  = 14'h01;
-localparam CSR_ECFG_NO  = 14'h04;
-localparam CSR_ERA_NO   = 14'h06;
-localparam CSR_TCFG_NO  = 14'h41;
-localparam CSR_TICLR_NO = 14'h44;
-
-wire ex1_writes_int_csr;
-assign ex1_writes_int_csr = ex1_csr_we && (
-    ex1_csr_num == CSR_CRMD_NO  ||
-    ex1_csr_num == CSR_ECFG_NO  ||
-    ex1_csr_num == CSR_TCFG_NO  ||
-    ex1_csr_num == CSR_TICLR_NO
-);
-
-wire ex2_writes_int_csr;
-assign ex2_writes_int_csr = ex2_csr_we && (
-    ex2_csr_num == CSR_CRMD_NO  ||
-    ex2_csr_num == CSR_ECFG_NO  ||
-    ex2_csr_num == CSR_TCFG_NO  ||
-    ex2_csr_num == CSR_TICLR_NO
-);
-
-wire ex3_writes_int_csr;
-assign ex3_writes_int_csr = ex3_csr_we && (
-    ex3_csr_num == CSR_CRMD_NO  ||
-    ex3_csr_num == CSR_ECFG_NO  ||
-    ex3_csr_num == CSR_TCFG_NO  ||
-    ex3_csr_num == CSR_TICLR_NO
-);
-
-wire ex1_writes_ertn_csr;
-assign ex1_writes_ertn_csr = ex1_csr_we && (
-    ex1_csr_num == CSR_ERA_NO  ||
-    ex1_csr_num == CSR_PRMD_NO
-);
-
-wire ex2_writes_ertn_csr;
-assign ex2_writes_ertn_csr = ex2_csr_we && (
-    ex2_csr_num == CSR_ERA_NO  ||
-    ex2_csr_num == CSR_PRMD_NO
-);
-
-wire ex3_writes_ertn_csr;
-assign ex3_writes_ertn_csr = ex3_csr_we && (
-    ex3_csr_num == CSR_ERA_NO  ||
-    ex3_csr_num == CSR_PRMD_NO
-);
-
-wire id_needs_int_csr  = 1'b1;
-wire id_needs_ertn_csr = inst_ertn;
-
-wire csr_stall;
-// CSR/TLB state is committed in EX3.  Keep every younger instruction behind
-// a pending state-changing operation so address translation, interrupts, and
-// back-to-back TLB snapshots observe a single architectural state.
-assign csr_stall = ds_valid && (
-    issue_csr_we || ex1_csr_we || ex2_csr_we || ex3_csr_we ||
-    issue_is_ertn || ex1_is_ertn || ex2_is_ertn || ex3_is_ertn ||
-    issue_tlb_pending || ex1_tlb_pending || ex2_tlb_pending || ex3_tlb_pending
-);
 
 // ============================================================
 // Exception detection in ID stage
@@ -745,9 +506,16 @@ reg  [`FS_TO_DS_BUS_WD -1:0] fs_to_ds_bus_r;
 
 assign {ds_inst,
         ds_pc,
+        fs_epoch,
         fs_ex,
         fs_ecode,
-        fs_esubcode} = fs_to_ds_bus_r;
+        fs_esubcode,
+        fs_pc_next,
+        fs_pred_valid,
+        fs_pred_taken,
+        fs_pred_target,
+        fs_pred_type,
+        fs_pred_meta} = fs_to_ds_bus_r;
 
 // ============================================================
 // Write-back bus unpack
@@ -758,10 +526,7 @@ assign {rf_we   ,  //37:37
        } = ws_to_rf_bus;
 
 // ============================================================
-// DS -> ES bus
-// Format: {ds_ex, ds_ecode, ds_esubcode, rdcntv, rdcntvh, rdcntid,
-//           tlb_op, invtlb_op, inst_cacop, cacop_code,
-//           original 180-bit fields}
+// Canonical instruction packet
 // ============================================================
 // Once ID already carries an exception, the instruction bits are no longer
 // architecturally executable.  Sanitize privileged opcodes at the issue
@@ -770,77 +535,89 @@ assign {rf_we   ,  //37:37
 wire [2:0] issue_tlb_op = ds_ex ? 3'b0 : tlb_op;
 wire [1:0] issue_csr_op = ds_ex ? 2'b0 : csr_op;
 wire       issue_ertn   = ds_ex ? 1'b0 : inst_ertn;
+reg [31:0] instruction_seq_id;
+wire muldiv_class = inst_mul_w || inst_mulh_w || inst_mulh_wu ||
+                    inst_div_w || inst_mod_w || inst_div_wu || inst_mod_wu;
+wire system_class = inst_syscall || inst_ertn || inst_idle;
+wire [3:0] issue_op_class = (inst_dbar || inst_ibar) ? `OP_CLASS_BARRIER :
+                            (issue_tlb_op != 3'b0)   ? `OP_CLASS_TLB :
+                            (issue_csr_op != 2'b0)   ? `OP_CLASS_CSR :
+                            system_class             ? `OP_CLASS_SYSTEM :
+                            (load_op || store_op)    ? `OP_CLASS_MEMORY :
+                            (branch_op || inst_b || inst_bl || inst_jirl)
+                                                     ? `OP_CLASS_BRANCH :
+                            muldiv_class             ? `OP_CLASS_MULDIV :
+                                                       `OP_CLASS_ALU;
 
-assign ds_to_es_bus = {ds_ex,
-                       ds_ecode,
-                       ds_esubcode,
-                       ds_inst,
-                       inst_ll_w,
-                       inst_sc_w,
-                       inst_dbar,
-                       inst_ibar,
-                       inst_idle,
-                       inst_rdcntv,
-                       inst_rdcntvh_w,
-                       inst_rdcntid,
-                       issue_tlb_op,
-                       invtlb_op,
-                       inst_cacop,
-                       cacop_code,
-                       // original 180-bit payload
-                       alu_op       ,
-                       load_op      ,
-                       mem_size     ,
-                       mem_unsigned ,
-                       src1_is_pc   ,
-                       src2_is_imm  ,
-                       src2_is_4    ,
-                       gr_we        ,
-                       mem_we       ,
-                       dest         ,
-                       imm          ,
-                       rj_value     ,
-                       rkd_value    ,
-                       ds_pc        ,
-                       res_from_mem ,
-                       issue_csr_op ,
-                       csr_num      ,
-                       inst_syscall ,
-                       issue_ertn
-                      };
+instruction_packet_pack u_instruction_packet_pack(
+    .packet(ds_to_es_bus),
+    .exception_valid(ds_ex), .ecode(ds_ecode), .esubcode(ds_esubcode),
+    .inst(ds_inst), .inst_ll_w(inst_ll_w), .inst_sc_w(inst_sc_w),
+    .inst_dbar(inst_dbar), .inst_ibar(inst_ibar), .inst_idle(inst_idle),
+    .rdcntv(inst_rdcntv), .rdcntv_hi(inst_rdcntvh_w), .rdcntid(inst_rdcntid),
+    .tlb_op(issue_tlb_op), .invtlb_op(invtlb_op),
+    .inst_cacop(inst_cacop), .cacop_code(cacop_code),
+    .alu_op(alu_op), .load_op(load_op), .mem_size(mem_size),
+    .mem_unsigned(mem_unsigned), .src1_is_pc(src1_is_pc),
+    .src2_is_imm(src2_is_imm), .src2_is_4(src2_is_4),
+    .dst_valid(gr_we), .mem_we(mem_we), .dst_reg(dest), .immediate(imm),
+    .rj_value(rj_value), .rkd_value(rkd_value), .pc(ds_pc),
+    .res_from_mem(res_from_mem), .csr_op(issue_csr_op), .csr_num(csr_num),
+    .inst_syscall(inst_syscall), .inst_ertn(issue_ertn),
+    .seq_id(instruction_seq_id), .lane_id(1'b0),
+    .fetch_epoch({{(8-`FETCH_EPOCH_WD){1'b0}}, fs_epoch}),
+    .pc_next(fs_pc_next), .pred_valid(fs_pred_valid),
+    .pred_taken(fs_pred_taken), .pred_target(fs_pred_target),
+    .pred_type(fs_pred_type), .pred_meta(fs_pred_meta),
+    .src_valid({~src_no_rd, ~src_no_rk, ~src_no_rj}),
+    .src0_reg(rj), .src1_reg(rk), .src2_reg(rd),
+    .op_class(issue_op_class), .badv(ds_ex ? ds_pc : 32'b0)
+);
 
 // ============================================================
 // Pipeline control
 // ============================================================
-assign ds_ready_go    = ds_valid && ~producer_not_ready_stall && ~csr_stall &&
-                        !flush && !ertn_flush && !ibar_flush &&
-                        !br_redirect_valid_r;
-assign ds_allowin     = !ds_valid || ds_ready_go && es_allowin;
-assign ds_to_es_valid = ds_valid && ds_ready_go;
+assign ds_operation_ready = ds_valid && !flush && !ertn_flush && !ibar_flush;
+wire   ds_out_fire    = ds_to_es_valid && ds_to_es_ready;
+wire   ds_in_fire     = fs_to_ds_valid && fs_to_ds_ready;
+assign fs_to_ds_ready = !ds_valid || (ds_operation_ready && ds_to_es_ready);
+assign ds_to_es_valid = ds_valid && ds_operation_ready;
+always @(posedge clk) begin
+    if (reset)
+        instruction_seq_id <= 32'b0;
+    else if (ds_out_fire)
+        instruction_seq_id <= instruction_seq_id + 32'd1;
+end
 
 always @(posedge clk) begin
     if (reset || flush || ertn_flush || ibar_flush || ex1_redirect) begin
-        br_redirect_valid_r  <= 1'b0;
-        br_redirect_target_r <= 32'b0;
-    end
-    else begin
-        br_redirect_valid_r <= br_taken_raw;
-        br_redirect_target_r <= br_target_raw;
-    end
-end
-
-always @(posedge clk) begin
-    if (reset || flush || ertn_flush || ibar_flush || ex1_redirect || br_redirect_valid_r) begin
         ds_valid <= 1'b0;
     end
-    else if (ds_allowin) begin
+    else if (fs_to_ds_ready) begin
         ds_valid <= fs_to_ds_valid;
     end
 
-    if (fs_to_ds_valid && ds_allowin && !flush && !ertn_flush &&
-        !ibar_flush && !ex1_redirect && !br_redirect_valid_r) begin
+    if (ds_in_fire && !flush && !ertn_flush &&
+        !ibar_flush && !ex1_redirect) begin
         fs_to_ds_bus_r <= fs_to_ds_bus;
     end
 end
+
+`ifndef SYNTHESIS
+reg                        ds_stalled_last;
+reg [`FS_TO_DS_BUS_WD-1:0] ds_payload_last;
+always @(posedge clk) begin
+    if (reset || flush || ertn_flush || ibar_flush || ex1_redirect) begin
+        ds_stalled_last <= 1'b0;
+    end
+    else begin
+        if (ds_stalled_last && (!ds_to_es_valid ||
+                                fs_to_ds_bus_r !== ds_payload_last))
+            $error("decode payload changed while stalled");
+        ds_stalled_last <= ds_to_es_valid && !ds_to_es_ready;
+        ds_payload_last <= fs_to_ds_bus_r;
+    end
+end
+`endif
 
 endmodule
