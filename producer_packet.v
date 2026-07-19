@@ -33,14 +33,18 @@ assign value       = packet[`PRODUCER_VALUE_HI:`PRODUCER_VALUE_LO];
 endmodule
 
 // Producers are packed with producer 0 in the least-significant slice and
-// must be supplied newest first.  In an in-order pipeline the first matching
-// packet is necessarily the youngest older producer.  seq_id remains in the
-// packet for assertions, redirect age comparison and future two-lane logic.
+// must be supplied newest first.  Every producer visible from Issue is older
+// than the Issue consumer, so the first matching packet is the required
+// youngest producer.  Do not compare all 32-bit sequence IDs here: doing so
+// creates a long cascaded maximum-selection carry chain on the Issue-to-fetch
+// backpressure path.  seq_id remains in the interface for age assertions and
+// redirect handling elsewhere in the core.
 module producer_resolver #(
     parameter PRODUCER_COUNT = `PRODUCER_COUNT
 )(
     input                            src_valid,
     input      [4:0]                 src_reg,
+    input      [31:0]                consumer_seq_id,
     input      [31:0]                regfile_value,
     input      [PRODUCER_COUNT*`PRODUCER_PACKET_WD-1:0] producers,
     output reg                       hit,
@@ -72,4 +76,8 @@ always @(*) begin
         end
     end
 end
+
+// Kept intentionally as interface metadata; producer selection relies on the
+// in-order stage ordering documented above.
+wire unused_consumer_seq_id = ^consumer_seq_id;
 endmodule

@@ -192,7 +192,7 @@ end
 wire unused_ex2_empty = ex2_empty;
 
 wire ex1_result_ready = ex1_valid && gr_we &&
-                                !res_from_mem &&
+                                !load_op &&
                                 !mem_we &&
                                 (csr_op == 2'b00) &&
                                 !ds_rdcntv &&
@@ -511,7 +511,7 @@ wire priv_fast_kill = priv_privilege_kill || priv_interrupt;
 wire sc_success = inst_sc_w && sc_can_store && !ex_pending;
 wire actual_mem_we = side_actual_mem_we && (!inst_sc_w || sc_success);
 wire mem_access_ok = ex3_valid && !ex_pending;
-wire es_mem_access = (res_from_mem || actual_mem_we) && mem_access_ok;
+wire es_mem_access = (es_load_op || actual_mem_we) && mem_access_ok;
 wire privileged_state_op = csr_we_req || (tlb_op != 3'b0) ||
                            ex_pending || ertn_pending;
 wire privileged_state_ready = !privileged_state_op || older_pipe_empty;
@@ -729,7 +729,7 @@ assign ex3_to_mem_bus = {ex3_seq_id,
                          side_data_access_cached,
                          data_paddr[31:4],
                          es_mem_access,
-                         res_from_mem,
+                         es_load_op,
                          mem_size,
                          mem_unsigned,
                          (ex_pending || ertn_pending) ? 1'b0 : gr_we,
@@ -742,7 +742,7 @@ assign ex3_to_mem_bus = {ex3_seq_id,
 // final_operation_ready cuts barrier/cache handshakes out of the ID/IF
 // back-pressure cone without changing when a real producer becomes ready.
 wire ex3_result_ready = ex3_valid && gr_we &&
-                                !res_from_mem &&
+                                !es_load_op &&
                                 !inst_sc_w &&
                                 !ex_pending &&
                                 !ertn_pending;
@@ -1579,7 +1579,7 @@ always @(*) begin
         exe_result = div_result;
     else if (mul_op === 1'b1)
         exe_result = mul_result;
-    else if (res_from_mem === 1'b1 || es_mem_we === 1'b1)
+    else if (es_load_op === 1'b1 || es_mem_we === 1'b1)
         exe_result = mem_addr;
     else
         exe_result = alu_result;
@@ -1595,7 +1595,7 @@ end
 
 // Suppress memory access on exceptions.
 wire mem_access_ok = es_valid && !ex_pending;
-wire es_mem_access = (res_from_mem || actual_mem_we) && mem_access_ok;
+wire es_mem_access = (es_load_op || actual_mem_we) && mem_access_ok;
 
 assign data_sram_req    = 1'b0;
 assign data_sram_wr     = actual_mem_we && mem_access_ok;

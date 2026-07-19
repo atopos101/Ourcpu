@@ -135,7 +135,8 @@
 `define PRODUCER_SEQ_LO          39
 `define PRODUCER_SEQ_HI          70
 `define PRODUCER_VALID_BIT       71
-`define PRODUCER_COUNT            6
+// Five forwarding points for each architectural lane (EX1..WB).
+`define PRODUCER_COUNT            10
 `define PRODUCER_SET_WD (`PRODUCER_COUNT * `PRODUCER_PACKET_WD)
 
 // Two architectural lane positions are exposed even though lane1 is held

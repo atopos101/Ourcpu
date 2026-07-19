@@ -14,11 +14,14 @@ module id_stage(
     //from fs
     input                          fs_to_ds_valid,
     input  [`FS_TO_DS_BUS_WD -1:0] fs_to_ds_bus  ,
+    input  [31:0]                 fs_seq_id      ,
+    input                          lane_id        ,
     //to es
     output                         ds_to_es_valid,
     output [`DS_TO_ES_BUS_WD -1:0] ds_to_es_bus  ,
     //to rf: for write back
     input  [`WS_TO_RF_BUS_WD -1:0] ws_to_rf_bus  ,
+    input  [`WS_TO_RF_BUS_WD -1:0] ws1_to_rf_bus ,
     // ertn flush
     input        ertn_flush
 );
@@ -140,6 +143,9 @@ wire [31:0] rf_rdata2;
 wire        rf_we   ;
 wire [ 4:0] rf_waddr;
 wire [31:0] rf_wdata;
+wire        rf1_we;
+wire [4:0]  rf1_waddr;
+wire [31:0] rf1_wdata;
 
 wire [31:0] alu_src1   ;
 wire [31:0] alu_src2   ;
@@ -453,7 +459,7 @@ regfile_lane_wrapper u_regfile(
     .lane1_raddr0(5'b0      ), .lane1_rdata0(),
     .lane1_raddr1(5'b0      ), .lane1_rdata1(),
     .wb0_valid    (rf_we     ), .wb0_addr(rf_waddr), .wb0_data(rf_wdata),
-    .wb1_valid    (1'b0      ), .wb1_addr(5'b0), .wb1_data(32'b0)
+    .wb1_valid    (rf1_we     ), .wb1_addr(rf1_waddr), .wb1_data(rf1_wdata)
     );
 // Decode captures the register-file snapshot and source descriptors only.
 // The Issue stage resolves the newest producer and overwrites these operand
@@ -524,6 +530,7 @@ assign {rf_we   ,  //37:37
         rf_waddr,  //36:32
         rf_wdata   //31:0
        } = ws_to_rf_bus;
+assign {rf1_we, rf1_waddr, rf1_wdata} = ws1_to_rf_bus;
 
 // ============================================================
 // Canonical instruction packet
@@ -538,12 +545,14 @@ wire       issue_ertn   = ds_ex ? 1'b0 : inst_ertn;
 reg [31:0] instruction_seq_id;
 wire muldiv_class = inst_mul_w || inst_mulh_w || inst_mulh_wu ||
                     inst_div_w || inst_mod_w || inst_div_wu || inst_mod_wu;
-wire system_class = inst_syscall || inst_ertn || inst_idle;
+wire system_class = inst_syscall || inst_ertn || inst_idle ||
+                    inst_rdcntv || inst_rdcntvh_w || inst_rdcntid;
 wire [3:0] issue_op_class = (inst_dbar || inst_ibar) ? `OP_CLASS_BARRIER :
                             (issue_tlb_op != 3'b0)   ? `OP_CLASS_TLB :
                             (issue_csr_op != 2'b0)   ? `OP_CLASS_CSR :
                             system_class             ? `OP_CLASS_SYSTEM :
-                            (load_op || store_op)    ? `OP_CLASS_MEMORY :
+                            (load_op || store_op || inst_cacop)
+                                                     ? `OP_CLASS_MEMORY :
                             (branch_op || inst_b || inst_bl || inst_jirl)
                                                      ? `OP_CLASS_BRANCH :
                             muldiv_class             ? `OP_CLASS_MULDIV :
@@ -564,7 +573,7 @@ instruction_packet_pack u_instruction_packet_pack(
     .rj_value(rj_value), .rkd_value(rkd_value), .pc(ds_pc),
     .res_from_mem(res_from_mem), .csr_op(issue_csr_op), .csr_num(csr_num),
     .inst_syscall(inst_syscall), .inst_ertn(issue_ertn),
-    .seq_id(instruction_seq_id), .lane_id(1'b0),
+    .seq_id(instruction_seq_id), .lane_id(lane_id),
     .fetch_epoch({{(8-`FETCH_EPOCH_WD){1'b0}}, fs_epoch}),
     .pc_next(fs_pc_next), .pred_valid(fs_pred_valid),
     .pred_taken(fs_pred_taken), .pred_target(fs_pred_target),
@@ -583,15 +592,10 @@ wire   ds_in_fire     = fs_to_ds_valid && fs_to_ds_ready;
 assign fs_to_ds_ready = !ds_valid || (ds_operation_ready && ds_to_es_ready);
 assign ds_to_es_valid = ds_valid && ds_operation_ready;
 always @(posedge clk) begin
-    if (reset)
-        instruction_seq_id <= 32'b0;
-    else if (ds_out_fire)
-        instruction_seq_id <= instruction_seq_id + 32'd1;
-end
-
-always @(posedge clk) begin
     if (reset || flush || ertn_flush || ibar_flush || ex1_redirect) begin
         ds_valid <= 1'b0;
+        if (reset)
+            instruction_seq_id <= 32'b0;
     end
     else if (fs_to_ds_ready) begin
         ds_valid <= fs_to_ds_valid;
@@ -600,6 +604,7 @@ always @(posedge clk) begin
     if (ds_in_fire && !flush && !ertn_flush &&
         !ibar_flush && !ex1_redirect) begin
         fs_to_ds_bus_r <= fs_to_ds_bus;
+        instruction_seq_id <= fs_seq_id;
     end
 end
 

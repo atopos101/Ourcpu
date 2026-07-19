@@ -2,9 +2,9 @@
 `default_nettype wire
 `include "mycpu.vh"
 
-// Lane-0 issue boundary.  Decode currently performs the single-lane hazard
-// decision; this elastic register makes that decision independent of EX1
-// backpressure and provides the structural point where lane pairing is added.
+// Ordered two-slot issue queue.  Lane1 is a restricted companion lane:
+// only two independent, exception-free scalar ALU operations may leave in
+// parallel.  Every other bundle is split without changing program order.
 module issue_stage(
     input                               clk,
     input                               reset,
@@ -27,180 +27,257 @@ module issue_stage(
     output                              pending_tlb
 );
 
-reg                                issue_valid;
-reg [`ID_TO_EX1_BUS_WD-1:0]        issue_packet;
+reg valid0, valid1;
+reg [`ID_TO_EX1_BUS_WD-1:0] packet0, packet1;
 
-wire [1:0] packet_csr_op;
-wire       packet_dst_valid;
-wire [4:0] packet_dst_reg;
-wire [13:0] packet_csr_num;
-wire       packet_ertn;
-wire [2:0] packet_tlb_op;
-wire [31:0] packet_seq_id;
-wire [2:0]  packet_src_valid;
-wire [4:0]  packet_src0_reg;
-wire [4:0]  packet_src1_reg;
-wire [4:0]  packet_src2_reg;
-wire [31:0] packet_rj_value;
-wire [31:0] packet_rkd_value;
-
-instruction_packet_unpack u_instruction_packet_unpack(
-    .packet(issue_packet),
-    .seq_id(packet_seq_id),
-    .src_valid(packet_src_valid), .src0_reg(packet_src0_reg),
-    .src1_reg(packet_src1_reg), .src2_reg(packet_src2_reg),
-    .rj_value(packet_rj_value), .rkd_value(packet_rkd_value),
-    .dst_valid(packet_dst_valid), .dst_reg(packet_dst_reg),
-    .csr_op(packet_csr_op), .csr_num(packet_csr_num),
-    .inst_ertn(packet_ertn), .tlb_op(packet_tlb_op)
+// Decode may have held an instruction while an older producer reached WB.
+// At the accepting edge the register file still exposes its pre-NBA value,
+// so refresh both incoming packets from the live producer set before the
+// producer disappears.
+wire [2:0] in_src_valid0, in_src_valid1;
+wire [4:0] in_src00, in_src01, in_src02, in_src10, in_src11, in_src12;
+wire [31:0] in_rj0, in_rkd0, in_rj1, in_rkd1;
+wire [31:0] in_seq0, in_seq1;
+instruction_packet_unpack u_in_unpack0(
+    .packet(decode_packet[0 +: `ID_TO_EX1_BUS_WD]),
+    .seq_id(in_seq0),
+    .src_valid(in_src_valid0),
+    .src0_reg(in_src00), .src1_reg(in_src01), .src2_reg(in_src02),
+    .rj_value(in_rj0), .rkd_value(in_rkd0)
 );
-
-wire lane0_decode_valid = decode_valid[0];
-wire [`ID_TO_EX1_BUS_WD-1:0] lane0_decode_packet =
-    decode_packet[0 +: `ID_TO_EX1_BUS_WD];
-wire lane0_ready = issue_lane_ready[0];
-
-wire rj_hit;
-wire rk_hit;
-wire rd_hit;
-wire rj_value_valid;
-wire rk_value_valid;
-wire rd_value_valid;
-wire [31:0] resolved_rj_value;
-wire [31:0] resolved_rk_value;
-wire [31:0] resolved_rd_value;
-wire [31:0] rj_producer_seq;
-wire [31:0] rk_producer_seq;
-wire [31:0] rd_producer_seq;
-
-producer_resolver u_issue_rj_resolver(
-    .src_valid(packet_src_valid[0]), .src_reg(packet_src0_reg),
-    .regfile_value(packet_rj_value), .producers(producer_set),
-    .hit(rj_hit), .value_valid(rj_value_valid), .value(resolved_rj_value),
-    .producer_seq_id(rj_producer_seq)
+instruction_packet_unpack u_in_unpack1(
+    .packet(decode_packet[`ID_TO_EX1_BUS_WD +: `ID_TO_EX1_BUS_WD]),
+    .seq_id(in_seq1),
+    .src_valid(in_src_valid1),
+    .src0_reg(in_src10), .src1_reg(in_src11), .src2_reg(in_src12),
+    .rj_value(in_rj1), .rkd_value(in_rkd1)
 );
-producer_resolver u_issue_rk_resolver(
-    .src_valid(packet_src_valid[1]), .src_reg(packet_src1_reg),
-    .regfile_value(packet_rkd_value), .producers(producer_set),
-    .hit(rk_hit), .value_valid(rk_value_valid), .value(resolved_rk_value),
-    .producer_seq_id(rk_producer_seq)
-);
-producer_resolver u_issue_rd_resolver(
-    .src_valid(packet_src_valid[2]), .src_reg(packet_src2_reg),
-    .regfile_value(packet_rkd_value), .producers(producer_set),
-    .hit(rd_hit), .value_valid(rd_value_valid), .value(resolved_rd_value),
-    .producer_seq_id(rd_producer_seq)
-);
-
-wire operands_ready = (!packet_src_valid[0] || rj_value_valid) &&
-                      (!packet_src_valid[1] || rk_value_valid) &&
-                      (!packet_src_valid[2] || rd_value_valid);
-wire issue_operation_ready = operands_ready && !serialize_pending;
-wire [31:0] resolved_rkd_value = packet_src_valid[1] ? resolved_rk_value :
-                                 packet_src_valid[2] ? resolved_rd_value :
-                                                       packet_rkd_value;
-reg [`ID_TO_EX1_BUS_WD-1:0] resolved_issue_packet;
+wire in_vv00, in_vv01, in_vv02, in_vv10, in_vv11, in_vv12;
+wire [31:0] in_rv00, in_rv01, in_rv02, in_rv10, in_rv11, in_rv12;
+producer_resolver in_r00(.src_valid(in_src_valid0[0]), .src_reg(in_src00),
+    .consumer_seq_id(in_seq0),
+    .regfile_value(in_rj0), .producers(producer_set),
+    .value_valid(in_vv00), .value(in_rv00));
+producer_resolver in_r01(.src_valid(in_src_valid0[1]), .src_reg(in_src01),
+    .consumer_seq_id(in_seq0),
+    .regfile_value(in_rkd0), .producers(producer_set),
+    .value_valid(in_vv01), .value(in_rv01));
+producer_resolver in_r02(.src_valid(in_src_valid0[2]), .src_reg(in_src02),
+    .consumer_seq_id(in_seq0),
+    .regfile_value(in_rkd0), .producers(producer_set),
+    .value_valid(in_vv02), .value(in_rv02));
+producer_resolver in_r10(.src_valid(in_src_valid1[0]), .src_reg(in_src10),
+    .consumer_seq_id(in_seq1),
+    .regfile_value(in_rj1), .producers(producer_set),
+    .value_valid(in_vv10), .value(in_rv10));
+producer_resolver in_r11(.src_valid(in_src_valid1[1]), .src_reg(in_src11),
+    .consumer_seq_id(in_seq1),
+    .regfile_value(in_rkd1), .producers(producer_set),
+    .value_valid(in_vv11), .value(in_rv11));
+producer_resolver in_r12(.src_valid(in_src_valid1[2]), .src_reg(in_src12),
+    .consumer_seq_id(in_seq1),
+    .regfile_value(in_rkd1), .producers(producer_set),
+    .value_valid(in_vv12), .value(in_rv12));
+reg [`ID_TO_EX1_BUS_WD-1:0] refreshed_decode0, refreshed_decode1;
 always @(*) begin
-    resolved_issue_packet = issue_packet;
-    resolved_issue_packet[`INST_PKT_RJ_VALUE_HI:`INST_PKT_RJ_VALUE_LO] =
-        resolved_rj_value;
-    resolved_issue_packet[`INST_PKT_RKD_VALUE_HI:`INST_PKT_RKD_VALUE_LO] =
-        resolved_rkd_value;
+    refreshed_decode0 = decode_packet[0 +: `ID_TO_EX1_BUS_WD];
+    if (in_src_valid0[0] && in_vv00)
+        refreshed_decode0[`INST_PKT_RJ_VALUE_HI:`INST_PKT_RJ_VALUE_LO] = in_rv00;
+    if (in_src_valid0[1] && in_vv01)
+        refreshed_decode0[`INST_PKT_RKD_VALUE_HI:`INST_PKT_RKD_VALUE_LO] = in_rv01;
+    else if (in_src_valid0[2] && in_vv02)
+        refreshed_decode0[`INST_PKT_RKD_VALUE_HI:`INST_PKT_RKD_VALUE_LO] = in_rv02;
+    refreshed_decode1 = decode_packet[`ID_TO_EX1_BUS_WD +: `ID_TO_EX1_BUS_WD];
+    if (in_src_valid1[0] && in_vv10)
+        refreshed_decode1[`INST_PKT_RJ_VALUE_HI:`INST_PKT_RJ_VALUE_LO] = in_rv10;
+    if (in_src_valid1[1] && in_vv11)
+        refreshed_decode1[`INST_PKT_RKD_VALUE_HI:`INST_PKT_RKD_VALUE_LO] = in_rv11;
+    else if (in_src_valid1[2] && in_vv12)
+        refreshed_decode1[`INST_PKT_RKD_VALUE_HI:`INST_PKT_RKD_VALUE_LO] = in_rv12;
 end
 
-assign decode_ready[0] = !issue_valid || (issue_operation_ready && lane0_ready);
-// lane1 is architecturally present but closed; no instruction may enter it.
-assign decode_ready[1] = 1'b0;
-assign issue_lane_valid = {1'b0, issue_valid && issue_operation_ready};
-assign issue_lane_packet = {{`ID_TO_EX1_BUS_WD{1'b0}}, resolved_issue_packet};
-wire decode_fire = lane0_decode_valid && decode_ready[0];
-wire lane0_fire  = issue_valid && issue_operation_ready && lane0_ready;
-assign stall_data = issue_valid && !operands_ready;
-assign stall_struct = issue_valid && operands_ready && serialize_pending;
+wire [2:0] src_valid0, src_valid1;
+wire [4:0] src00, src01, src02, src10, src11, src12;
+wire [31:0] rj0, rkd0, rj1, rkd1;
+wire [31:0] seq0, seq1;
+wire dst_valid0, dst_valid1;
+wire [4:0] dst0, dst1;
+wire [1:0] csr_op0;
+wire [13:0] csr_num0;
+wire ertn0;
+wire [2:0] tlb_op0;
+wire [3:0] op_class0, op_class1;
+wire exception0, exception1;
 
-// These fields describe the instruction while it is between Decode and EX1.
-// Decode treats its destination as not-ready, preventing a younger consumer
-// from overlooking this newly introduced pipeline boundary.
-assign pending_dst     = (issue_valid && packet_dst_valid) ? packet_dst_reg : 5'b0;
-assign pending_csr_we  = issue_valid && ((packet_csr_op == 2'b10) ||
-                                         (packet_csr_op == 2'b11));
-assign pending_csr_num = packet_csr_num;
-assign pending_ertn    = issue_valid && packet_ertn;
-assign pending_tlb     = issue_valid && (packet_tlb_op != 3'b0);
-
-producer_packet_pack u_issue_producer_packet(
-    .valid(issue_valid),
-    .seq_id(packet_seq_id),
-    .dst_valid(packet_dst_valid),
-    .dst(packet_dst_reg),
-    .value_valid(1'b0),
-    .value(32'b0),
-    .packet(producer_packet)
+instruction_packet_unpack u_unpack0(
+    .packet(packet0), .exception_valid(exception0),
+    .seq_id(seq0), .src_valid(src_valid0),
+    .src0_reg(src00), .src1_reg(src01), .src2_reg(src02),
+    .rj_value(rj0), .rkd_value(rkd0),
+    .dst_valid(dst_valid0), .dst_reg(dst0),
+    .csr_op(csr_op0), .csr_num(csr_num0), .inst_ertn(ertn0),
+    .tlb_op(tlb_op0), .op_class(op_class0)
+);
+instruction_packet_unpack u_unpack1(
+    .packet(packet1), .exception_valid(exception1),
+    .seq_id(seq1), .src_valid(src_valid1),
+    .src0_reg(src10), .src1_reg(src11), .src2_reg(src12),
+    .rj_value(rj1), .rkd_value(rkd1),
+    .dst_valid(dst_valid1), .dst_reg(dst1), .op_class(op_class1)
 );
 
-always @(posedge clk) begin
-    if (reset || kill) begin
-        issue_valid <= 1'b0;
-    end
-    else if (decode_ready[0]) begin
-        issue_valid <= lane0_decode_valid;
-        if (decode_fire)
-            issue_packet <= lane0_decode_packet;
-    end
-    else if (issue_valid) begin
-        // A packet may wait for one source (for example store data from a
-        // load) after another source has already become forwardable.  Retain
-        // each forwarded operand as soon as it is ready; otherwise its
-        // producer can retire and disappear from producer_set, exposing the
-        // stale register-file snapshot taken in Decode.
-        if (packet_src_valid[0] && rj_hit && rj_value_valid)
-            issue_packet[`INST_PKT_RJ_VALUE_HI:`INST_PKT_RJ_VALUE_LO]
-                <= resolved_rj_value;
-        if (packet_src_valid[1] && rk_hit && rk_value_valid)
-            issue_packet[`INST_PKT_RKD_VALUE_HI:`INST_PKT_RKD_VALUE_LO]
-                <= resolved_rk_value;
-        else if (packet_src_valid[2] && rd_hit && rd_value_valid)
-            issue_packet[`INST_PKT_RKD_VALUE_HI:`INST_PKT_RKD_VALUE_LO]
-                <= resolved_rd_value;
-    end
+wire [31:0] rv00, rv01, rv02, rv10, rv11, rv12;
+wire vv00, vv01, vv02, vv10, vv11, vv12;
+wire hit00, hit01, hit02, hit10, hit11, hit12;
+wire [31:0] ps00, ps01, ps02, ps10, ps11, ps12;
+
+producer_resolver r00(.src_valid(src_valid0[0]), .src_reg(src00),
+    .consumer_seq_id(seq0),
+    .regfile_value(rj0), .producers(producer_set), .hit(hit00),
+    .value_valid(vv00), .value(rv00), .producer_seq_id(ps00));
+producer_resolver r01(.src_valid(src_valid0[1]), .src_reg(src01),
+    .consumer_seq_id(seq0),
+    .regfile_value(rkd0), .producers(producer_set), .hit(hit01),
+    .value_valid(vv01), .value(rv01), .producer_seq_id(ps01));
+producer_resolver r02(.src_valid(src_valid0[2]), .src_reg(src02),
+    .consumer_seq_id(seq0),
+    .regfile_value(rkd0), .producers(producer_set), .hit(hit02),
+    .value_valid(vv02), .value(rv02), .producer_seq_id(ps02));
+producer_resolver r10(.src_valid(src_valid1[0]), .src_reg(src10),
+    .consumer_seq_id(seq1),
+    .regfile_value(rj1), .producers(producer_set), .hit(hit10),
+    .value_valid(vv10), .value(rv10), .producer_seq_id(ps10));
+producer_resolver r11(.src_valid(src_valid1[1]), .src_reg(src11),
+    .consumer_seq_id(seq1),
+    .regfile_value(rkd1), .producers(producer_set), .hit(hit11),
+    .value_valid(vv11), .value(rv11), .producer_seq_id(ps11));
+producer_resolver r12(.src_valid(src_valid1[2]), .src_reg(src12),
+    .consumer_seq_id(seq1),
+    .regfile_value(rkd1), .producers(producer_set), .hit(hit12),
+    .value_valid(vv12), .value(rv12), .producer_seq_id(ps12));
+
+wire operands0_ready = (!src_valid0[0] || vv00) &&
+                       (!src_valid0[1] || vv01) &&
+                       (!src_valid0[2] || vv02);
+wire operands1_ready = (!src_valid1[0] || vv10) &&
+                       (!src_valid1[1] || vv11) &&
+                       (!src_valid1[2] || vv12);
+wire lane1_reads_lane0 =
+    dst_valid0 && (dst0 != 5'b0) &&
+    ((src_valid1[0] && src10 == dst0) ||
+     (src_valid1[1] && src11 == dst0) ||
+     (src_valid1[2] && src12 == dst0));
+wire pair_static = valid0 && valid1 &&
+                   (op_class0 == `OP_CLASS_ALU) &&
+                   (op_class1 == `OP_CLASS_ALU) &&
+                   // Companion-lane results are correct for independent
+                   // operands.  Dependent slot-1 instructions are promoted
+                   // and re-resolved as lane0 instead of consuming a stale
+                   // same-window forwarding snapshot.
+                   !hit10 && !hit11 && !hit12 &&
+                   !exception0 && !exception1 && !lane1_reads_lane0 &&
+                   !serialize_pending;
+
+reg [`ID_TO_EX1_BUS_WD-1:0] resolved0, resolved1;
+always @(*) begin
+    resolved0 = packet0;
+    resolved0[`INST_PKT_RJ_VALUE_HI:`INST_PKT_RJ_VALUE_LO] = rv00;
+    resolved0[`INST_PKT_RKD_VALUE_HI:`INST_PKT_RKD_VALUE_LO] =
+        src_valid0[1] ? rv01 : src_valid0[2] ? rv02 : rkd0;
+    resolved1 = packet1;
+    resolved1[`INST_PKT_RJ_VALUE_HI:`INST_PKT_RJ_VALUE_LO] = rv10;
+    resolved1[`INST_PKT_RKD_VALUE_HI:`INST_PKT_RKD_VALUE_LO] =
+        src_valid1[1] ? rv11 : src_valid1[2] ? rv12 : rkd1;
 end
 
-`ifndef SYNTHESIS
-reg                                stalled_last;
-reg [`ID_TO_EX1_BUS_WD-1:0]        packet_last;
+wire lane0_offer = valid0 && operands0_ready && !serialize_pending;
+wire lane1_offer = lane0_offer && pair_static && operands1_ready;
+wire fire0 = lane0_offer && issue_lane_ready[0];
+wire pair_fire = fire0 && lane1_offer && issue_lane_ready[1];
+wire split_fire = fire0 && valid1 && !pair_fire;
+wire bundle_slot_free = !valid0 || (fire0 && (!valid1 || pair_fire));
+
+assign decode_ready = {2{bundle_slot_free}};
+assign issue_lane_valid = {lane1_offer, lane0_offer};
+// Slot 1 may issue only when none of its operands hits an in-flight producer
+// (pair_static).  Feeding its resolved bypass values to the companion ALU
+// therefore adds an unnecessary same-cycle main-ALU -> companion-ALU path.
+// Keep resolved1 for split promotion, but use the registered slot packet for
+// a legal paired issue.
+assign issue_lane_packet = {packet1, resolved0};
+assign stall_data = valid0 && (!operands0_ready ||
+                    (pair_static && !operands1_ready));
+assign stall_struct = valid0 && operands0_ready &&
+                      (serialize_pending ||
+                       (pair_static && !issue_lane_ready[1]));
+
+assign pending_dst = valid0 && dst_valid0 ? dst0 : 5'b0;
+assign pending_csr_we = valid0 && (csr_op0 == 2'b10 || csr_op0 == 2'b11);
+assign pending_csr_num = csr_num0;
+assign pending_ertn = valid0 && ertn0;
+assign pending_tlb = valid0 && (tlb_op0 != 3'b0);
+
+producer_packet_pack u_issue_producer(
+    .valid(valid0), .seq_id(seq0), .dst_valid(dst_valid0), .dst(dst0),
+    .value_valid(1'b0), .value(32'b0), .packet(producer_packet)
+);
+
+wire decode_fire = decode_valid[0] && bundle_slot_free;
 always @(posedge clk) begin
     if (reset || kill) begin
-        stalled_last <= 1'b0;
+        valid0 <= 1'b0;
+        valid1 <= 1'b0;
+    end
+    else if (decode_fire) begin
+        valid0 <= decode_valid[0];
+        valid1 <= decode_valid[1];
+        packet0 <= refreshed_decode0;
+        packet1 <= refreshed_decode1;
+    end
+    else if (pair_fire || (fire0 && !valid1)) begin
+        valid0 <= 1'b0;
+        valid1 <= 1'b0;
+    end
+    else if (split_fire) begin
+        valid0 <= 1'b1;
+        valid1 <= 1'b0;
+        // Slot 1 may consume a value that becomes forwardable on the same
+        // edge that slot 0 leaves.  Preserve the resolved operand snapshot
+        // when promoting it; copying the raw packet can retain a stale
+        // register-file value after the producer retires and disappears.
+        packet0 <= resolved1;
     end
     else begin
-        // Operand snapshots are intentionally allowed to absorb forwarding
-        // results while stalled.  All instruction identity/control fields
-        // around those two adjacent value slots must remain stable.
-        if (stalled_last &&
-            (!issue_valid ||
-             issue_packet[`ID_TO_EX1_BUS_WD-1:`INST_PKT_RJ_VALUE_HI+1] !==
-                 packet_last[`ID_TO_EX1_BUS_WD-1:`INST_PKT_RJ_VALUE_HI+1] ||
-             issue_packet[`INST_PKT_RKD_VALUE_LO-1:0] !==
-                 packet_last[`INST_PKT_RKD_VALUE_LO-1:0]))
-            $error("issue packet changed while stalled");
-        stalled_last <= issue_valid && !(issue_operation_ready && lane0_ready);
-        packet_last  <= issue_packet;
+        if (valid0 && src_valid0[0] && hit00 && vv00)
+            packet0[`INST_PKT_RJ_VALUE_HI:`INST_PKT_RJ_VALUE_LO] <= rv00;
+        if (valid0 && src_valid0[1] && hit01 && vv01)
+            packet0[`INST_PKT_RKD_VALUE_HI:`INST_PKT_RKD_VALUE_LO] <= rv01;
+        else if (valid0 && src_valid0[2] && hit02 && vv02)
+            packet0[`INST_PKT_RKD_VALUE_HI:`INST_PKT_RKD_VALUE_LO] <= rv02;
+        if (valid1 && src_valid1[0] && hit10 && vv10)
+            packet1[`INST_PKT_RJ_VALUE_HI:`INST_PKT_RJ_VALUE_LO] <= rv10;
+        if (valid1 && src_valid1[1] && hit11 && vv11)
+            packet1[`INST_PKT_RKD_VALUE_HI:`INST_PKT_RKD_VALUE_LO] <= rv11;
+        else if (valid1 && src_valid1[2] && hit12 && vv12)
+            packet1[`INST_PKT_RKD_VALUE_HI:`INST_PKT_RKD_VALUE_LO] <= rv12;
     end
 end
-`endif
-
-wire unused_lane0_fire = lane0_fire;
 
 `ifndef SYNTHESIS
 always @(posedge clk) begin
-    if (!reset && decode_valid[1])
-        $error("lane1 must remain disabled in the single-issue baseline");
-    if (!reset && issue_valid &&
-        ((rj_hit && !(rj_producer_seq < packet_seq_id)) ||
-         (rk_hit && !(rk_producer_seq < packet_seq_id)) ||
-         (rd_hit && !(rd_producer_seq < packet_seq_id))))
-        $error("Issue selected a producer that is not older than its consumer");
+    if (!reset && valid1 && !(seq0 < seq1))
+        $error("issue bundle sequence order is not lane0 < lane1");
+    if (!reset && pair_fire && (lane1_reads_lane0 ||
+        op_class0 != `OP_CLASS_ALU || op_class1 != `OP_CLASS_ALU))
+        $error("illegal lane1 pairing");
+    if (!reset && valid0 &&
+        ((hit00 && !(ps00 < seq0)) || (hit01 && !(ps01 < seq0)) ||
+         (hit02 && !(ps02 < seq0))))
+        $error("lane0 selected a non-older producer");
+    if (!reset && valid1 &&
+        ((hit10 && !(ps10 < seq1)) || (hit11 && !(ps11 < seq1)) ||
+         (hit12 && !(ps12 < seq1))))
+        $error("lane1 selected a non-older producer");
 end
 `endif
-
 endmodule

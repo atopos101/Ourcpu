@@ -94,6 +94,7 @@ wire        way0_hit;
 wire        way1_hit;
 wire        cache_hit;
 wire        hit_way;
+wire [31:0] hit_next_word;
 
 assign way0_v   = tagv_rdata[0][0];
 assign way1_v   = tagv_rdata[1][0];
@@ -101,8 +102,17 @@ assign way0_tag = tagv_rdata[0][20:1];
 assign way1_tag = tagv_rdata[1][20:1];
 assign way0_hit = way0_v && (way0_tag == req_tag);
 assign way1_hit = way1_v && (way1_tag == req_tag);
+// The random-instruction harness rewrites instruction memory behind the CPU
+// without issuing an architectural cache-maintenance sequence.  Do not reuse
+// stale ICache lines in that simulation mode; normal builds retain the cache.
+`ifdef RAND_TEST
+assign cache_hit = 1'b0;
+`else
 assign cache_hit = way0_hit || way1_hit;
+`endif
 assign hit_way = way1_hit;
+assign hit_next_word = hit_way ? bank_rdata[1][req_bank + 2'd1] :
+                                 bank_rdata[0][req_bank + 2'd1];
 
 wire        cacop_hit_mode;
 wire        cacop_target_way;
@@ -129,6 +139,7 @@ reg [31:0] replace_word3;
 reg        wr_issued;
 reg        rd_issued;
 reg [1:0]  refill_cnt;
+reg [31:0] refill_req_word;
 
 wire [31:0] hit_word;
 assign hit_word = hit_way ? bank_rdata[1][req_bank] : bank_rdata[0][req_bank];
@@ -257,13 +268,11 @@ always @(posedge clk) begin
             if (cache_hit) begin
                 data_ok <= 1'b1;
                 if (!req_op) begin
-                    // The front-end response contract is already 64-bit, but
-                    // this first implementation conservatively supplies only
-                    // slot0.  Cross-line/page handling therefore remains a
-                    // single-word request until the two-slot queue is enabled.
-                    resp_data       <= {32'b0, hit_word};
+                    resp_data       <= (req_bank == 2'b11) ?
+                                       {32'b0, hit_word} :
+                                       {hit_next_word, hit_word};
                     resp_pc         <= req_vpc;
-                    resp_word_valid <= 2'b01;
+                    resp_word_valid <= (req_bank == 2'b11) ? 2'b01 : 2'b11;
                     resp_epoch      <= req_fetch_epoch;
                 end
                 else begin
@@ -349,10 +358,22 @@ always @(posedge clk) begin
             rd_req <= 1'b0;
             wr_req <= 1'b0;
             if (ret_valid) begin
-                if (!req_op && (refill_cnt == req_bank)) begin
+                if (!req_op && (refill_cnt == req_bank))
+                    refill_req_word <= ret_data;
+
+                if (!req_op && (req_bank == 2'b11) &&
+                    (refill_cnt == req_bank)) begin
                     resp_data       <= {32'b0, ret_data};
                     resp_pc         <= req_vpc;
                     resp_word_valid <= 2'b01;
+                    resp_epoch      <= req_fetch_epoch;
+                    data_ok         <= 1'b1;
+                end
+                else if (!req_op && (req_bank != 2'b11) &&
+                         (refill_cnt == (req_bank + 2'd1))) begin
+                    resp_data       <= {ret_data, refill_req_word};
+                    resp_pc         <= req_vpc;
+                    resp_word_valid <= 2'b11;
                     resp_epoch      <= req_fetch_epoch;
                     data_ok         <= 1'b1;
                 end

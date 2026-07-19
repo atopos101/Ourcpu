@@ -61,6 +61,13 @@ module core_top #(
     output [ 3:0] debug0_wb_rf_wen,
     output [ 4:0] debug0_wb_rf_wnum,
     output [31:0] debug0_wb_rf_wdata
+`ifdef CPU_2CMT
+    ,
+    output [31:0] debug1_wb_pc,
+    output [ 3:0] debug1_wb_rf_wen,
+    output [ 4:0] debug1_wb_rf_wnum,
+    output [31:0] debug1_wb_rf_wdata
+`endif
 );
 
 wire        core_inst_req;
@@ -205,6 +212,12 @@ mycpu_core #(
 assign ws_valid = u_core.wb_stage.ws_valid;
 assign rf_rdata = (reg_num == 5'b0) ? 32'b0
                                     : u_core.id_stage.u_regfile.rf[reg_num];
+`ifdef CPU_2CMT
+assign debug1_wb_pc       = u_core.lane1_wb_pc;
+assign debug1_wb_rf_wen   = {4{u_core.lane1_wb_rf_we}};
+assign debug1_wb_rf_wnum  = u_core.lane1_wb_rf_waddr;
+assign debug1_wb_rf_wdata = u_core.lane1_wb_rf_wdata;
+`endif
 
 assign core_data_addr_ok = core_data_uncached ? uncache_addr_ok : dcache_addr_ok;
 assign core_data_data_ok = uncache_data_ok || dcache_data_ok;
@@ -708,6 +721,7 @@ always @(posedge clk) begin
 end
 
 wire         fetch_queue_to_decode_ready;
+wire         lane0_decode_ready;
 wire [`ARCH_LANE_COUNT-1:0] decode_to_issue_ready;
 wire         issue_to_ex1_ready;
 wire         ex1_to_ex2_ready;
@@ -723,12 +737,15 @@ wire [`FS_TO_DS_BUS_WD -1:0] fs_to_ds_bus;
 wire [`DS_TO_ES_BUS_WD -1:0] ds_to_es_bus;
 wire [`MS_TO_WS_BUS_WD -1:0] ms_to_ws_bus;
 wire [`WS_TO_RF_BUS_WD -1:0] ws_to_rf_bus;
+wire [`WS_TO_RF_BUS_WD -1:0] ws1_to_rf_bus;
 
 // Target-architecture decoupling boundaries.
 wire         f2_to_fetch_queue_valid;
 wire         fetch_queue_to_decode_valid;
 wire         fetch_queue_in_ready;
 wire [`FS_TO_DS_BUS_WD-1:0] f2_to_fetch_queue_bus;
+wire                         f2_to_fetch_queue_slot1_valid;
+wire [`FS_TO_DS_BUS_WD-1:0] f2_to_fetch_queue_slot1_bus;
 wire [`FS_TO_DS_BUS_WD-1:0] fetch_queue_to_decode_bus;
 wire         fetch_queue_slot1_valid;
 wire         fetch_queue_packet_valid;
@@ -753,12 +770,30 @@ wire [`PRODUCER_PACKET_WD-1:0] ex2_producer_packet;
 wire [`PRODUCER_PACKET_WD-1:0] ex3_producer_packet;
 wire [`PRODUCER_PACKET_WD-1:0] mem_producer_packet;
 wire [`PRODUCER_PACKET_WD-1:0] wb_producer_packet;
+wire [`PRODUCER_PACKET_WD-1:0] lane1_ex1_producer_packet;
+wire [`PRODUCER_PACKET_WD-1:0] lane1_ex2_producer_packet;
+wire [`PRODUCER_PACKET_WD-1:0] lane1_ex3_producer_packet;
+wire [`PRODUCER_PACKET_WD-1:0] lane1_mem_producer_packet;
+wire [`PRODUCER_PACKET_WD-1:0] lane1_wb_producer_packet;
+wire lane1_wb_valid;
+wire [31:0] lane1_wb_pc;
+wire [31:0] lane1_wb_instr;
+wire        lane1_wb_rf_we;
+wire [4:0]  lane1_wb_rf_waddr;
+wire [31:0] lane1_wb_rf_wdata;
 wire issue_stall_data;
 wire issue_stall_struct;
 wire branch_resolve_fire;
 wire [`ARCH_LANE_COUNT-1:0] commit_lane_valid;
 wire [`ARCH_LANE_COUNT*32-1:0] commit_lane_seq_id;
 wire [`ARCH_LANE_COUNT-1:0] commit_lane_id;
+wire lane1_decode_ready;
+wire lane1_decode_valid;
+wire [`ID_TO_EX1_BUS_WD-1:0] lane1_decode_bus;
+wire lane1_issue_valid = issue_lane_valid[1];
+wire [`ID_TO_EX1_BUS_WD-1:0] issue_lane1_bus =
+    issue_lane_bus[`ID_TO_EX1_BUS_WD +: `ID_TO_EX1_BUS_WD];
+reg [31:0] next_instruction_seq_id;
 
 // Every pipeline boundary is an explicit valid/ready pair.
 wire         if1_to_if2_ready;
@@ -910,7 +945,7 @@ wire [31:0] predictor_lookup_target;
 wire [2:0]  predictor_lookup_type;
 wire [15:0] predictor_lookup_meta;
 wire [63:0] predictor_update_count;
-wire        fetch_pred_valid = (ENABLE_BP != 0) ? predictor_lookup_hit : 1'b1;
+wire        fetch_pred_valid = (ENABLE_BP != 0) ? predictor_lookup_hit : 1'b0;
 wire        fetch_pred_taken = (ENABLE_BP != 0) ? predictor_lookup_taken : 1'b0;
 wire [31:0] fetch_pred_target = (ENABLE_BP != 0) ? predictor_lookup_target :
                                                    (inst_vaddr + 32'd4);
@@ -1016,6 +1051,8 @@ if2_stage if2_stage(
     .if1_to_if2_bus      (if1_to_if2_bus      ),
     .if2_to_queue_valid  (f2_to_fetch_queue_valid),
     .if2_to_queue_packet (f2_to_fetch_queue_bus),
+    .if2_to_queue_slot1_valid(f2_to_fetch_queue_slot1_valid),
+    .if2_to_queue_slot1_packet(f2_to_fetch_queue_slot1_bus),
     .inst_sram_data_ok   (inst_sram_data_ok   ),
     .inst_sram_resp_data (inst_sram_resp_data ),
     .inst_sram_resp_pc   (inst_sram_resp_pc   ),
@@ -1032,8 +1069,8 @@ fetch_packet_queue #(.DEPTH(4), .PTR_W(2)) u_fetch_queue(
     .in_ready     (fetch_queue_in_ready        ),
     .slot0_in_valid(f2_to_fetch_queue_valid    ),
     .slot0_in_packet(f2_to_fetch_queue_bus     ),
-    .slot1_in_valid(1'b0                       ),
-    .slot1_in_packet({`FS_TO_DS_BUS_WD{1'b0}}  ),
+    .slot1_in_valid(f2_to_fetch_queue_slot1_valid),
+    .slot1_in_packet(f2_to_fetch_queue_slot1_bus),
     .out_valid    (fetch_queue_packet_valid    ),
     .out_ready    (fetch_queue_to_decode_ready ),
     .slot0_out_valid(fetch_queue_to_decode_valid),
@@ -1043,7 +1080,12 @@ fetch_packet_queue #(.DEPTH(4), .PTR_W(2)) u_fetch_queue(
     .occupancy    (fetch_queue_occupancy       )
 );
 
-assign fs_to_ds_valid = fetch_queue_to_decode_valid;
+wire fetch_decode_accept = fetch_queue_packet_valid &&
+                           fetch_queue_to_decode_ready;
+assign fetch_queue_to_decode_ready =
+    lane0_decode_ready &&
+    (!fetch_queue_slot1_valid || lane1_decode_ready);
+assign fs_to_ds_valid = fetch_queue_to_decode_valid && fetch_decode_accept;
 assign fs_to_ds_bus   = fetch_queue_to_decode_bus;
 
 // ID stage
@@ -1055,21 +1097,52 @@ id_stage id_stage(
     .ex1_redirect   (ex1_redirect_valid || branch_redirect_valid ||
                      redirect_valid),
     .ds_to_es_ready (decode_to_issue_ready[0]),
-    .fs_to_ds_ready (fetch_queue_to_decode_ready),
+    .fs_to_ds_ready (lane0_decode_ready),
     //from fs
     .fs_to_ds_valid (fs_to_ds_valid ),
     .fs_to_ds_bus   (fs_to_ds_bus   ),
+    .fs_seq_id      (next_instruction_seq_id),
+    .lane_id        (1'b0           ),
     //to es
     .ds_to_es_valid (ds_to_es_valid ),
     .ds_to_es_bus   (ds_to_es_bus   ),
     //to rf: for write back
     .ws_to_rf_bus   (ws_to_rf_bus   ),
+    .ws1_to_rf_bus  (ws1_to_rf_bus  ),
     .ertn_flush     (ertn_flush     )
 );
 
-assign decode_to_issue_valid = {1'b0, ds_to_es_valid};
-assign decode_to_issue_bus   = {{`ID_TO_EX1_BUS_WD{1'b0}}, ds_to_es_bus};
-assign issue_lane_ready      = {1'b0, issue_to_ex1_ready};
+id_stage id_stage_lane1(
+    .clk            (clk            ),
+    .reset          (reset          ),
+    .flush          (flush          ),
+    .ibar_flush     (ibar_flush     ),
+    .ex1_redirect   (ex1_redirect_valid || branch_redirect_valid ||
+                     redirect_valid),
+    .ds_to_es_ready (decode_to_issue_ready[1]),
+    .fs_to_ds_ready (lane1_decode_ready),
+    .fs_to_ds_valid (fetch_queue_slot1_valid && fetch_decode_accept),
+    .fs_to_ds_bus   (fetch_queue_slot1_bus),
+    .fs_seq_id      (next_instruction_seq_id + 32'd1),
+    .lane_id        (1'b1           ),
+    .ds_to_es_valid (lane1_decode_valid),
+    .ds_to_es_bus   (lane1_decode_bus),
+    .ws_to_rf_bus   (ws_to_rf_bus   ),
+    .ws1_to_rf_bus  (ws1_to_rf_bus  ),
+    .ertn_flush     (ertn_flush     )
+);
+
+always @(posedge clk) begin
+    if (reset)
+        next_instruction_seq_id <= 32'b0;
+    else if (fetch_decode_accept)
+        next_instruction_seq_id <= next_instruction_seq_id +
+                                   (fetch_queue_slot1_valid ? 32'd2 : 32'd1);
+end
+
+assign decode_to_issue_valid = {lane1_decode_valid, ds_to_es_valid};
+assign decode_to_issue_bus   = {lane1_decode_bus, ds_to_es_bus};
+assign issue_lane_ready      = {issue_to_ex1_ready, issue_to_ex1_ready};
 
 // Issue is lane-shaped from the outset; only lane0 is enabled in this phase.
 issue_stage issue_stage(
@@ -1084,9 +1157,11 @@ issue_stage issue_stage(
     .issue_lane_valid(issue_lane_valid       ),
     .issue_lane_ready(issue_lane_ready       ),
     .issue_lane_packet(issue_lane_bus        ),
-    .producer_set    ({wb_producer_packet, mem_producer_packet,
-                       ex3_producer_packet, ex2_producer_packet,
-                       ex1_producer_packet, {`PRODUCER_PACKET_WD{1'b0}}}),
+    .producer_set    ({wb_producer_packet, lane1_wb_producer_packet,
+                       mem_producer_packet, lane1_mem_producer_packet,
+                       ex3_producer_packet, lane1_ex3_producer_packet,
+                       ex2_producer_packet, lane1_ex2_producer_packet,
+                       ex1_producer_packet, lane1_ex1_producer_packet}),
     .serialize_pending(ex1_csr_we || ex2_csr_we || ex3_csr_we ||
                        ex1_is_ertn || ex2_is_ertn || ex3_is_ertn ||
                        ex1_tlb_pending || ex2_tlb_pending || ex3_tlb_pending),
@@ -1319,6 +1394,36 @@ wb_stage wb_stage(
     .debug_wb_rf_wdata(debug_wb_rf_wdata)
 );
 
+companion_lane u_companion_lane(
+    .clk               (clk),
+    .reset             (reset),
+    .kill_execute      (flush || ertn_flush || ibar_flush),
+    .issue_valid       (lane1_issue_valid && id_to_ex1_valid),
+    .issue_packet      (issue_lane1_bus),
+    .issue_to_ex1_ready(issue_to_ex1_ready),
+    .lane0_ex1_valid   (ex1_to_ex2_valid),
+    .ex1_to_ex2_ready  (ex1_to_ex2_ready),
+    .lane0_ex2_valid   (ex2_to_ex3_valid),
+    .ex2_to_ex3_ready  (ex2_to_ex3_ready),
+    .lane0_ex3_valid   (ex3_to_mem_valid),
+    .ex3_to_mem_ready  (ex3_to_mem_ready),
+    .lane0_mem_valid   (ms_to_ws_valid),
+    .mem_to_wb_ready   (mem_to_wb_ready),
+    .ws_to_rf_bus      (ws1_to_rf_bus),
+    .ex1_producer      (lane1_ex1_producer_packet),
+    .ex2_producer      (lane1_ex2_producer_packet),
+    .ex3_producer      (lane1_ex3_producer_packet),
+    .mem_producer      (lane1_mem_producer_packet),
+    .wb_producer       (lane1_wb_producer_packet),
+    .wb_valid          (lane1_wb_valid),
+    .wb_pc             (lane1_wb_pc),
+    .wb_instr          (lane1_wb_instr),
+    .wb_rf_we          (lane1_wb_rf_we),
+    .wb_rf_waddr       (lane1_wb_rf_waddr),
+    .wb_rf_wdata       (lane1_wb_rf_wdata)
+);
+
+/*
 // Baseline performance counters.  They are intentionally kept inside
 // mycpu_core so simulation, ILA or a later CSR mapping can observe the same
 // definitions without changing the architectural interface.
@@ -1328,6 +1433,7 @@ wb_stage wb_stage(
 (* keep = "true" *) reg [63:0] fetch_queue_full_cycles;
 (* keep = "true" *) reg [63:0] issue_stall_data_cycles;
 (* keep = "true" *) reg [63:0] issue_stall_struct_cycles;
+(* keep = "true" *) reg [63:0] dual_issue_count;
 (* keep = "true" *) reg [63:0] branch_count;
 (* keep = "true" *) reg [63:0] mispredict_count;
 (* keep = "true" *) reg [63:0] icache_miss_count;
@@ -1350,6 +1456,7 @@ always @(posedge clk) begin
         fetch_queue_full_cycles  <= 64'b0;
         issue_stall_data_cycles  <= 64'b0;
         issue_stall_struct_cycles<= 64'b0;
+        dual_issue_count          <= 64'b0;
         branch_count             <= 64'b0;
         mispredict_count         <= 64'b0;
         icache_miss_count        <= 64'b0;
@@ -1366,8 +1473,9 @@ always @(posedge clk) begin
         icache_miss_event_d <= icache_miss_event;
         dcache_miss_event_d <= dcache_miss_event;
         cycle_count <= cycle_count + 64'd1;
-        if (!ws_empty)
-            commit_count <= commit_count + 64'd1;
+        if (!ws_empty || lane1_wb_valid)
+            commit_count <= commit_count +
+                            ((!ws_empty && lane1_wb_valid) ? 64'd2 : 64'd1);
         if (!fetch_queue_to_decode_valid)
             frontend_empty_cycles <= frontend_empty_cycles + 64'd1;
         if (fetch_queue_occupancy == 3'd4)
@@ -1376,6 +1484,8 @@ always @(posedge clk) begin
             issue_stall_data_cycles <= issue_stall_data_cycles + 64'd1;
         if (issue_stall_struct)
             issue_stall_struct_cycles <= issue_stall_struct_cycles + 64'd1;
+        if (issue_lane_valid == 2'b11 && issue_lane_ready == 2'b11)
+            dual_issue_count <= dual_issue_count + 64'd1;
         if (branch_resolve_fire)
             branch_count <= branch_count + 64'd1;
         if (ex1_redirect_valid)
@@ -1395,7 +1505,7 @@ always @(posedge clk) begin
         if (bp_update_valid)
             bp_update_count <= bp_update_count + 64'd1;
     end
-end
+end*/
 
 `ifdef SIMU
 // Keep the instruction and side-effect information beside the normal
@@ -1451,6 +1561,12 @@ reg        diff_commit_cntinst;
 reg [63:0] diff_commit_timer;
 reg        diff_commit_csr_rstat;
 reg [31:0] diff_commit_csr_data;
+reg        diff_commit1_valid;
+reg [31:0] diff_commit1_pc;
+reg [31:0] diff_commit1_instr;
+reg        diff_commit1_wen;
+reg [ 4:0] diff_commit1_wdest;
+reg [31:0] diff_commit1_wdata;
 reg [ 5:0] diff_excp_ecode;
 reg [31:0] diff_excp_pc;
 reg [31:0] diff_excp_instr;
@@ -1582,6 +1698,12 @@ always @(posedge clk) begin
         diff_commit_timer      <= 64'b0;
         diff_commit_csr_rstat  <= 1'b0;
         diff_commit_csr_data   <= 32'b0;
+        diff_commit1_valid     <= 1'b0;
+        diff_commit1_pc        <= 32'b0;
+        diff_commit1_instr     <= 32'b0;
+        diff_commit1_wen       <= 1'b0;
+        diff_commit1_wdest     <= 5'b0;
+        diff_commit1_wdata     <= 32'b0;
         diff_excp_ecode        <= 6'b0;
         diff_excp_pc           <= 32'b0;
         diff_excp_instr        <= 32'b0;
@@ -1665,6 +1787,12 @@ always @(posedge clk) begin
         diff_commit_timer         <= diff_ws_timer;
         diff_commit_csr_rstat     <= diff_ws_csr_rstat;
         diff_commit_csr_data      <= diff_ws_csr_data;
+        diff_commit1_valid        <= lane1_wb_valid;
+        diff_commit1_pc           <= lane1_wb_pc;
+        diff_commit1_instr        <= lane1_wb_instr;
+        diff_commit1_wen          <= lane1_wb_rf_we;
+        diff_commit1_wdest        <= lane1_wb_rf_waddr;
+        diff_commit1_wdata        <= lane1_wb_rf_wdata;
 
         if (ex3_stage.wb_ex) begin
             diff_excp_pending     <= 1'b1;
@@ -1731,6 +1859,25 @@ DifftestInstrCommit u_difftest_instr_commit(
     .csr_data       (diff_commit_csr_data)
 );
 
+DifftestInstrCommit u_difftest_instr_commit_lane1(
+    .clock          (clk),
+    .coreid         (8'd0),
+    .index          (8'd1),
+    .valid          (diff_commit1_valid),
+    .pc             ({32'b0, diff_commit1_pc}),
+    .instr          (diff_commit1_instr),
+    .skip           (1'b0),
+    .is_TLBFILL     (1'b0),
+    .TLBFILL_index  (5'b0),
+    .is_CNTinst     (1'b0),
+    .timer_64_value (64'b0),
+    .wen            (diff_commit1_wen),
+    .wdest          ({3'b0, diff_commit1_wdest}),
+    .wdata          ({32'b0, diff_commit1_wdata}),
+    .csr_rstat      (1'b0),
+    .csr_data       (32'b0)
+);
+
 DifftestTrapEvent u_difftest_trap_event(
     .clock    (clk),
     .coreid   (8'd0),
@@ -1786,46 +1933,74 @@ DifftestCSRRegState u_difftest_csr_state(
     .tcfg       ({32'b0, ex2_stage.u_csr_regfile.tcfg}),
     .tval       ({32'b0, ex2_stage.u_csr_regfile.tval}),
     .ticlr      (64'b0),
-    .llbctl     ({61'b0, diff_commit_llbctl}),
+    // LLBCTL[0] is the architectural LLBit and can change on LL/SC,
+    // invalidation, exception return, or WCLLB without a GPR writeback.
+    // Report the live committed reservation state instead of a WB-delayed
+    // snapshot, which can miss those transitions in difftest.
+    .llbctl     ({61'b0, llbctl_klo, 1'b0, reservation_valid}),
     .tlbrentry  ({32'b0, ex2_stage.u_csr_regfile.tlbrentry}),
     .dmw0       ({32'b0, ex2_stage.u_csr_regfile.dmw0}),
     .dmw1       ({32'b0, ex2_stage.u_csr_regfile.dmw1})
 );
 
+// The testbench may sample difftest only once every several clocks.  Export
+// the architectural state at retirement instead of the speculative live
+// register file, which can already contain younger dual-issue writebacks.
+reg [31:0] diff_retired_gpr [0:31];
+integer diff_gpr_i;
+always @(posedge clk) begin
+    if (reset) begin
+        for (diff_gpr_i = 0; diff_gpr_i < 32;
+             diff_gpr_i = diff_gpr_i + 1)
+            diff_retired_gpr[diff_gpr_i] <= 32'b0;
+    end
+    else begin
+        diff_retired_gpr[0] <= 32'b0;
+        if (diff_wb_side_valid && (!diff_ws_excp || diff_ws_idle_int) &&
+            wb_stage.rf_we && (wb_stage.rf_waddr != 5'b0))
+            diff_retired_gpr[wb_stage.rf_waddr] <= wb_stage.rf_wdata;
+        // Lane1 is younger, so it wins a same-cycle WAW pair.
+        if (lane1_wb_valid && lane1_wb_rf_we &&
+            (lane1_wb_rf_waddr != 5'b0))
+            diff_retired_gpr[lane1_wb_rf_waddr] <= lane1_wb_rf_wdata;
+
+    end
+end
+
 DifftestGRegState u_difftest_gpr_state(
     .clock (clk), .coreid(8'd0),
     .gpr_0 (64'b0),
-    .gpr_1 ({32'b0, id_stage.u_regfile.rf[1]}),
-    .gpr_2 ({32'b0, id_stage.u_regfile.rf[2]}),
-    .gpr_3 ({32'b0, id_stage.u_regfile.rf[3]}),
-    .gpr_4 ({32'b0, id_stage.u_regfile.rf[4]}),
-    .gpr_5 ({32'b0, id_stage.u_regfile.rf[5]}),
-    .gpr_6 ({32'b0, id_stage.u_regfile.rf[6]}),
-    .gpr_7 ({32'b0, id_stage.u_regfile.rf[7]}),
-    .gpr_8 ({32'b0, id_stage.u_regfile.rf[8]}),
-    .gpr_9 ({32'b0, id_stage.u_regfile.rf[9]}),
-    .gpr_10({32'b0, id_stage.u_regfile.rf[10]}),
-    .gpr_11({32'b0, id_stage.u_regfile.rf[11]}),
-    .gpr_12({32'b0, id_stage.u_regfile.rf[12]}),
-    .gpr_13({32'b0, id_stage.u_regfile.rf[13]}),
-    .gpr_14({32'b0, id_stage.u_regfile.rf[14]}),
-    .gpr_15({32'b0, id_stage.u_regfile.rf[15]}),
-    .gpr_16({32'b0, id_stage.u_regfile.rf[16]}),
-    .gpr_17({32'b0, id_stage.u_regfile.rf[17]}),
-    .gpr_18({32'b0, id_stage.u_regfile.rf[18]}),
-    .gpr_19({32'b0, id_stage.u_regfile.rf[19]}),
-    .gpr_20({32'b0, id_stage.u_regfile.rf[20]}),
-    .gpr_21({32'b0, id_stage.u_regfile.rf[21]}),
-    .gpr_22({32'b0, id_stage.u_regfile.rf[22]}),
-    .gpr_23({32'b0, id_stage.u_regfile.rf[23]}),
-    .gpr_24({32'b0, id_stage.u_regfile.rf[24]}),
-    .gpr_25({32'b0, id_stage.u_regfile.rf[25]}),
-    .gpr_26({32'b0, id_stage.u_regfile.rf[26]}),
-    .gpr_27({32'b0, id_stage.u_regfile.rf[27]}),
-    .gpr_28({32'b0, id_stage.u_regfile.rf[28]}),
-    .gpr_29({32'b0, id_stage.u_regfile.rf[29]}),
-    .gpr_30({32'b0, id_stage.u_regfile.rf[30]}),
-    .gpr_31({32'b0, id_stage.u_regfile.rf[31]})
+    .gpr_1 ({32'b0, diff_retired_gpr[1]}),
+    .gpr_2 ({32'b0, diff_retired_gpr[2]}),
+    .gpr_3 ({32'b0, diff_retired_gpr[3]}),
+    .gpr_4 ({32'b0, diff_retired_gpr[4]}),
+    .gpr_5 ({32'b0, diff_retired_gpr[5]}),
+    .gpr_6 ({32'b0, diff_retired_gpr[6]}),
+    .gpr_7 ({32'b0, diff_retired_gpr[7]}),
+    .gpr_8 ({32'b0, diff_retired_gpr[8]}),
+    .gpr_9 ({32'b0, diff_retired_gpr[9]}),
+    .gpr_10({32'b0, diff_retired_gpr[10]}),
+    .gpr_11({32'b0, diff_retired_gpr[11]}),
+    .gpr_12({32'b0, diff_retired_gpr[12]}),
+    .gpr_13({32'b0, diff_retired_gpr[13]}),
+    .gpr_14({32'b0, diff_retired_gpr[14]}),
+    .gpr_15({32'b0, diff_retired_gpr[15]}),
+    .gpr_16({32'b0, diff_retired_gpr[16]}),
+    .gpr_17({32'b0, diff_retired_gpr[17]}),
+    .gpr_18({32'b0, diff_retired_gpr[18]}),
+    .gpr_19({32'b0, diff_retired_gpr[19]}),
+    .gpr_20({32'b0, diff_retired_gpr[20]}),
+    .gpr_21({32'b0, diff_retired_gpr[21]}),
+    .gpr_22({32'b0, diff_retired_gpr[22]}),
+    .gpr_23({32'b0, diff_retired_gpr[23]}),
+    .gpr_24({32'b0, diff_retired_gpr[24]}),
+    .gpr_25({32'b0, diff_retired_gpr[25]}),
+    .gpr_26({32'b0, diff_retired_gpr[26]}),
+    .gpr_27({32'b0, diff_retired_gpr[27]}),
+    .gpr_28({32'b0, diff_retired_gpr[28]}),
+    .gpr_29({32'b0, diff_retired_gpr[29]}),
+    .gpr_30({32'b0, diff_retired_gpr[30]}),
+    .gpr_31({32'b0, diff_retired_gpr[31]})
 );
 `endif
 

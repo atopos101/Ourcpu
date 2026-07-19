@@ -102,8 +102,12 @@ assign inst_sram_wdata = 32'b0;
 assign inst_sram_req_pc = if1b_pc;
 assign inst_sram_req_epoch = if1b_epoch;
 assign current_epoch = fetch_epoch;
+// A 64-bit response contains two instructions only when the request starts
+// at the lower word of its aligned eight-byte block.  From an address ending
+// in ...4, advancing by eight would skip the next sequential instruction.
+wire [31:0] sequential_next_pc = req_pc + (req_pc[2] ? 32'd4 : 32'd8);
 assign predicted_next_pc = (pred_valid && pred_taken) ? pred_target :
-                                                        (req_pc + 32'd4);
+                                                       sequential_next_pc;
 
 always @(posedge clk) begin
     if (reset) begin
@@ -360,6 +364,8 @@ module if2_stage(
     input  [`IF1_TO_IF2_BUS_WD-1:0] if1_to_if2_bus,
     output                         if2_to_queue_valid,
     output [`FS_TO_DS_BUS_WD-1:0]  if2_to_queue_packet,
+    output                         if2_to_queue_slot1_valid,
+    output [`FS_TO_DS_BUS_WD-1:0]  if2_to_queue_slot1_packet,
     input                          inst_sram_data_ok,
     input  [63:0]                  inst_sram_resp_data,
     input  [31:0]                  inst_sram_resp_pc,
@@ -372,7 +378,7 @@ localparam QUEUE_DEPTH = 4;
 localparam PTR_W = 2;
 
 reg [`IF1_TO_IF2_BUS_WD-1:0] meta_entries [0:QUEUE_DEPTH-1];
-reg [`FS_TO_DS_BUS_WD-1:0]   resp_entries [0:QUEUE_DEPTH-1];
+reg [`FETCH_PACKET_WD-1:0]   resp_entries [0:QUEUE_DEPTH-1];
 reg [PTR_W-1:0] meta_rd_ptr, meta_wr_ptr;
 reg [PTR_W-1:0] resp_rd_ptr, resp_wr_ptr;
 reg [PTR_W:0] meta_count, resp_count;
@@ -408,11 +414,18 @@ assign {head_pc, head_epoch, head_ex, head_ecode, head_esubcode,
 wire resp_out_fire = if2_to_queue_valid && if2_to_queue_ready;
 wire response_arrives = inst_sram_data_ok && (meta_count != 0);
 wire [3:0] reserved_count = meta_count + resp_count;
-wire capacity_available = (reserved_count < QUEUE_DEPTH) || resp_out_fire;
-// Only an exception would need a second response-FIFO write in a cycle that
-// an ICache response arrives.  Delay that rare descriptor by one cycle.
+// Keep the input ready path independent of the response consumer.  Allowing a
+// same-cycle pop to create capacity formed a combinational backpressure path
+// from EX3 through the issue/fetch stages and into the ICache response RAM.
+// Refusing that one full-and-pop cycle is conservative and breaks the path.
+wire capacity_available = (reserved_count < QUEUE_DEPTH);
+// A translation/fetch exception completes locally, while an older memory
+// fetch may still be waiting for ICache.  Letting that exception enter the
+// response FIFO would allow it to overtake the older instruction (notably at
+// a page boundary).  Hold local exceptions until every older memory response
+// has been consumed from the metadata queue.
 assign if1_to_if2_ready = !redirect && capacity_available &&
-                          !(in_ex && response_arrives);
+                          !(in_ex && (meta_count != 0));
 
 wire if2_in_fire = if1_to_if2_valid && if1_to_if2_ready;
 wire memory_accept = if2_in_fire && !in_ex;
@@ -433,8 +446,31 @@ wire [`FS_TO_DS_BUS_WD-1:0] memory_packet =
      head_pc_next, head_pred_valid, head_pred_taken, head_pred_target,
      head_pred_type, head_pred_meta};
 
+wire [`FS_TO_DS_BUS_WD-1:0] memory_packet1 =
+    {inst_sram_resp_data[63:32], head_pc + 32'd4, head_epoch,
+     1'b0, 6'b0, 9'b0, head_pc + 32'd8,
+     1'b0, 1'b0, head_pc + 32'd8, `PRED_TYPE_NONE, 16'b0};
+wire memory_slot1_valid = response_current &&
+                          inst_sram_resp_word_valid[1] &&
+                          !head_pc[2] &&
+                          // A taken prediction for slot0 redirects the
+                          // architectural stream before slot1.  Keeping the
+                          // sequential word would let a correctly predicted
+                          // branch's fall-through instruction retire because
+                          // no later mispredict flush is generated.
+                          !(head_pred_valid && head_pred_taken);
+wire [`FETCH_PACKET_WD-1:0] exception_fetch_packet =
+    {{`FS_TO_DS_BUS_WD{1'b0}}, exception_packet, 2'b01};
+wire [`FETCH_PACKET_WD-1:0] memory_fetch_packet =
+    {memory_packet1, memory_packet, memory_slot1_valid, 1'b1};
+
 assign if2_to_queue_valid = (resp_count != 0) && !redirect;
-assign if2_to_queue_packet = resp_entries[resp_rd_ptr];
+assign if2_to_queue_packet =
+    resp_entries[resp_rd_ptr][2 +: `FS_TO_DS_BUS_WD];
+assign if2_to_queue_slot1_valid =
+    if2_to_queue_valid && resp_entries[resp_rd_ptr][1];
+assign if2_to_queue_slot1_packet =
+    resp_entries[resp_rd_ptr][2+`FS_TO_DS_BUS_WD +: `FS_TO_DS_BUS_WD];
 
 always @(posedge clk) begin
     if (reset) begin
@@ -472,7 +508,7 @@ always @(posedge clk) begin
         else begin
             if (resp_push) begin
                 resp_entries[resp_wr_ptr] <= exception_accept ?
-                                             exception_packet : memory_packet;
+                    exception_fetch_packet : memory_fetch_packet;
                 resp_wr_ptr <= resp_wr_ptr + 1'b1;
             end
             if (resp_out_fire)
