@@ -340,3 +340,7 @@ assign r_d1   = tlb_d1  [r_index];
 assign r_v1   = tlb_v1  [r_index];
 
 endmodule
+
+// Do not leak the strict default into legacy Verilog files that are compiled
+// later in the same Vivado compilation unit.
+`default_nettype wire

@@ -1,3 +1,7 @@
+// The XSIM compile file list contains third-party IP that leaves
+// `default_nettype set to none.  Make this legacy Verilog compilation unit
+// self-contained so ANSI input/output ports retain their implicit wire type.
+`default_nettype wire
 `include "mycpu.vh"
 
 module ex1_stage(
