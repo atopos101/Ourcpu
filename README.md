@@ -1,6 +1,6 @@
 # OurCPU：十级流水顺序双发射 LoongArch CPU
 
-本项目是一套使用 Verilog 实现的 32 位 LoongArch CPU。当前 RTL 采用十级弹性流水线、顺序双发射和动态分支预测，集成双路组相联 ICache/DCache、CSR、精确异常与中断、TLB/MMU、LL/SC、Cache 维护、`DBAR`/`IBAR`、`IDLE` 以及 32 位 AXI 主接口。
+本项目是一套使用 Verilog 实现的 32 位 LoongArch CPU。当前 RTL 采用十级弹性流水线、带三项滑动 Issue 窗口的顺序双发射和动态分支预测，集成双路组相联 ICache/DCache、CSR、精确异常与中断、TLB/MMU、LL/SC、Cache 维护、`CPUCFG`、`DBAR`/`IBAR`、`IDLE` 以及 32 位 AXI 主接口。
 
 设计采用保守的双发射策略：lane0 是完整功能主通路，lane1 是只执行普通整数 ALU 指令的 companion lane。满足配对条件时每拍最多发射、写回两条指令；不满足条件时在 Issue 中按程序顺序自动拆包，年轻指令随后转入 lane0，不丢失、不越序。
 
@@ -21,8 +21,8 @@ IF1 -> IF2 -> Fetch Queue -> Decode -> Issue
                          +---------------- Branch Predictor ----------------+
                          |                                                   |
                          v                                                   |
-IF1 -> IF2 -> 4-entry Fetch Queue -> Decode x2 -> 2-slot Issue -> lane0 full pipe
-                                                 |            \-> lane1 ALU pipe
+IF1 -> IF2 -> 4-entry Fetch Queue -> Decode x2 -> 3-entry sliding Issue -> lane0 full pipe
+                                                 |                    \-> lane1 ALU pipe
                                                  |
                     EX1/EX2/EX3/MEM/WB x 2 producer forwarding
 ```
@@ -44,7 +44,7 @@ redirect 会递增 fetch epoch，并清空尚未进入后端的队列。旧 epoc
 
 ## 3. 顺序双发射策略
 
-`issue_stage` 保存一个两槽 bundle，并统一完成数据相关检查、producer 解析、配对或拆包。
+`issue_stage` 是一个保持程序顺序的三项滑动窗口，并统一完成数据相关检查、producer 解析、配对或拆包。窗口头部的两条指令是当前发射候选；第三项在后方等待，使单发、双发和双译码接收可以连续衔接。
 
 只有同时满足以下条件时，两条指令才会并发离开 Issue：
 
@@ -54,7 +54,9 @@ redirect 会递增 fetch epoch，并清空尚未进入后端的队列。旧 epoc
 4. lane1 的源寄存器没有命中其他在途 producer；这是当前实现为 companion lane 采用的保守限制。
 5. 两个执行通路都 ready，且两个操作数集合都已就绪。
 
-不满足配对条件时只发射 lane0。若 bundle 中还有 slot1，Issue 会将其提升为下一拍的 lane0 指令，并保留已经解析出的最新操作数。
+不满足配对条件时只发射 lane0。每拍发射 0、1 或 2 条后，窗口会将剩余指令向队首压紧，再在空位足够时按顺序接收 Decode 的 1 或 2 条新指令；因此年轻指令可以跨越原始取指 bundle 边界形成新的候选对。被移动的指令会保留已经解析出的最新操作数，第三项解析相关时还会把窗口中更老的前两项视为未就绪 producer，避免越过队内 RAW 相关。
+
+该窗口不会改变顺序发射语义：只有最老指令可以进入 lane0，lane1 只能与它成对离开；redirect 或 kill 会清空全部三项。相比原来的两槽 bundle，第三项缓冲可减少拆包或下游反压造成的 Decode 空泡，并提高连续指令流重新配对的机会。
 
 lane1 的边界与 lane0 锁步经过 EX1、EX2、EX3、MEM 和 WB，但只携带 ALU 结果、PC、指令、目的寄存器和顺序号。它不拥有访存、乘除法、分支恢复、CSR/TLB、系统指令、Cache/屏障或异常资源。因此：
 
@@ -170,6 +172,7 @@ uncached access > DCache writeback > DCache refill > ICache refill
 - 原子访存：`ll.w`、`sc.w`
 - 分支跳转：`jirl`、`b`、`bl`、`beq`、`bne`、`blt`、`bge`、`bltu`、`bgeu`
 - CSR/系统：`csrrd`、`csrwr`、`csrxchg`、`ertn`、`syscall`、`break`、`rdcntvl.w`、`rdcntvh.w`、`rdcntid`
+- 配置查询：`cpucfg rd, rj`。当前实现识别标准 `CPUCFG` 编码，将其作为系统类指令串行执行；所有配置字均按未实现处理，因此无论 `rj` 给出的索引为何值，都向 `rd` 返回 `0`。这对软件查询的未实现配置字是合法响应，例如运行库查询 `0x10`～`0x12` 时会据此跳过相应的可选 Cache 几何信息。
 - TLB：`tlbsrch`、`tlbrd`、`tlbwr`、`tlbfill`、`invtlb`
 - Cache/同步：`cacop`、`dbar`、`ibar`、`idle`
 
@@ -207,7 +210,7 @@ module core_top #(
 | `fetch_queue.v` | 4 项双 slot Fetch Queue |
 | `branch_predictor.v` | BTB、gshare BHT、RAS 和提交训练逻辑 |
 | `id_stage.v` | LoongArch 指令译码、源/目的描述和双写回寄存器快照 |
-| `issue_stage.v` | 两槽顺序 Issue、producer 解析、配对、拆包和串行化 |
+| `issue_stage.v` | 三项顺序滑动 Issue 窗口、producer 解析、配对、拆包、压紧和串行化 |
 | `companion_lane.v` | 受限 lane1 ALU 锁步流水及其 producer/WB 输出 |
 | `instruction_packet.v` | 统一 instruction packet 的 pack/unpack |
 | `producer_packet.v` | producer packet、年龄过滤和 newest-older 选择 |
@@ -233,7 +236,7 @@ module core_top #(
 powershell -NoProfile -ExecutionPolicy Bypass -File tests/run_dual_issue.ps1
 ```
 
-该测试检查独立 ALU 双发射，以及 lane1 对 lane0 存在 RAW 时自动拆包且年轻指令不丢失。
+该测试检查独立 ALU 双发射，以及 lane1 对 lane0 存在 RAW 时自动拆包且年轻指令不丢失。滑动窗口相关回归还应覆盖单发/双发后的队列压紧、跨 bundle 重新配对、窗口满时的反压，以及 slot2 对队内更老 producer 的依赖阻塞。
 
 分支预测与顶层 elaboration：
 
@@ -247,9 +250,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/run_branch_prediction.
 
 - 连续独立 ALU 的稳定 2 IPC；
 - 跨 8 字节边界取指、taken slot0 对 slot1 的取消；
-- 组内 RAW 拆包、跨周期 RAW/WAW、load-use 和乘除法等待；
+- 组内 RAW 拆包、跨 bundle 配对、三项窗口压紧、跨周期 RAW/WAW、load-use 和乘除法等待；
 - 分支错误预测、异常、中断和 redirect 时 lane1 的取消；
-- CSR/TLB、Cache miss、非缓存访问、LL/SC、`CACOP`、`DBAR/IBAR` 和 `IDLE`；
+- `CPUCFG` 零值响应、CSR/TLB、Cache miss、非缓存访问、LL/SC、`CACOP`、`DBAR/IBAR` 和 `IDLE`；
 - 随机 backpressure 下不丢失、不重复、不乱序。
 
 ## 13. 当前限制
