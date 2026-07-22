@@ -170,11 +170,10 @@ wire lane1_reads_lane0 =
 wire pair_static = valid0 && valid1 &&
                    (op_class0 == `OP_CLASS_ALU) &&
                    (op_class1 == `OP_CLASS_ALU) &&
-                   // Companion-lane results are correct for independent
-                   // operands.  Dependent slot-1 instructions are promoted
-                   // and re-resolved as lane0 instead of consuming a stale
-                   // same-window forwarding snapshot.
-                   !hit10 && !hit11 && !hit12 &&
+                   // A dependency on slot 0 still requires ordered split
+                   // issue.  Dependencies on older instructions are legal
+                   // when the producer network marks their values ready;
+                   // resolved1 below carries those bypassed values.
                    !exception0 && !exception1 && !lane1_reads_lane0 &&
                    !serialize_pending;
 
@@ -199,12 +198,7 @@ wire bundle_slot_free = !valid0 || (fire0 && (!valid1 || pair_fire));
 
 assign decode_ready = {2{bundle_slot_free}};
 assign issue_lane_valid = {lane1_offer, lane0_offer};
-// Slot 1 may issue only when none of its operands hits an in-flight producer
-// (pair_static).  Feeding its resolved bypass values to the companion ALU
-// therefore adds an unnecessary same-cycle main-ALU -> companion-ALU path.
-// Keep resolved1 for split promotion, but use the registered slot packet for
-// a legal paired issue.
-assign issue_lane_packet = {packet1, resolved0};
+assign issue_lane_packet = {resolved1, resolved0};
 assign stall_data = valid0 && (!operands0_ready ||
                     (pair_static && !operands1_ready));
 assign stall_struct = valid0 && operands0_ready &&

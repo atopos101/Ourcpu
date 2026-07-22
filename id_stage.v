@@ -344,6 +344,15 @@ assign inst_rdcntid   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h0]
 
 wire inst_rdcntv = inst_rdcntvl_w | inst_rdcntvh_w;
 
+// CPUCFG: fixed bits [31:15] are zero and rk is 5'h1b.  The performance
+// runtime uses indices 0x10..0x12 only to discover optional cache geometry.
+// Returning zero is architecturally valid for unimplemented configuration
+// words and makes software skip cache-maintenance loops for those features.
+wire inst_cpucfg;
+assign inst_cpucfg = op_31_26_d[6'h00] & op_25_22_d[4'h0] &
+                     op_21_20_d[2'h0] & op_19_15_d[5'h00] &
+                     (rk == 5'h1b);
+
 // ============================================================
 // Instruction valid whitelist (for INE detection)
 // ============================================================
@@ -362,7 +371,7 @@ assign inst_valid = inst_add_w | inst_sub_w | inst_slt | inst_sltu |
                     inst_mod_w | inst_div_wu | inst_mod_wu |
                     inst_csrrd | inst_csrwr | inst_csrxchg |
                     inst_syscall | inst_ertn | inst_break |
-                    inst_rdcntvl_w | inst_rdcntvh_w | inst_rdcntid |
+                    inst_rdcntvl_w | inst_rdcntvh_w | inst_rdcntid | inst_cpucfg |
                     inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill | inst_invtlb |
                     inst_cacop | inst_dbar | inst_ibar | inst_idle;
 
@@ -389,7 +398,7 @@ assign alu_op[ 7] = inst_xor | inst_xori;
 assign alu_op[ 8] = inst_slli_w | inst_sll_w;
 assign alu_op[ 9] = inst_srli_w | inst_srl_w;
 assign alu_op[10] = inst_srai_w | inst_sra_w;
-assign alu_op[11] = inst_lu12i_w;
+assign alu_op[11] = inst_lu12i_w | inst_cpucfg;
 assign alu_op[12] = inst_div_w;
 assign alu_op[13] = inst_mul_w;
 assign alu_op[14] = inst_mulh_w;
@@ -404,7 +413,8 @@ assign need_ui12  = inst_andi | inst_ori | inst_xori;
 assign need_si20  = inst_lu12i_w | inst_pcaddu12i;
 assign src2_is_4  = inst_jirl | inst_bl;
 
-assign imm = src2_is_4 ? 32'h4                      :
+assign imm = inst_cpucfg ? 32'b0                    :
+             src2_is_4 ? 32'h4                      :
              need_si20 ? {i20[19:0], 12'b0}         :
              need_ui12 ? {20'b0, i12[11:0]}          :
              (inst_ll_w | inst_sc_w)
@@ -429,6 +439,7 @@ assign src2_is_imm   = inst_slli_w |
                        inst_andi    |
                        inst_ori     |
                        inst_xori    |
+                       inst_cpucfg  |
                        inst_jirl   |
                        inst_bl     ;
 
@@ -475,14 +486,14 @@ assign inst_no_dest = (store_op & ~inst_sc_w) | inst_preld | inst_b | branch_op 
 // ============================================================
 assign src_no_rj = inst_b | inst_bl | inst_lu12i_w | inst_pcaddu12i
                    | inst_csrrd | inst_csrwr | inst_syscall | inst_ertn
-                   | inst_rdcntv | inst_rdcntid
+                   | inst_rdcntv | inst_rdcntid | inst_cpucfg
                    | inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill
                    | inst_dbar | inst_ibar | inst_idle;
 assign src_no_rk = inst_slli_w | inst_srli_w | inst_srai_w | inst_addi_w | load_op | store_op
                    | inst_jirl | inst_b | inst_bl | branch_op | inst_lu12i_w | inst_pcaddu12i
                    | inst_slti | inst_sltui | inst_andi | inst_ori | inst_xori
                    | inst_csrrd | inst_csrwr | inst_csrxchg | inst_syscall | inst_ertn
-                   | inst_rdcntv | inst_rdcntid
+                   | inst_rdcntv | inst_rdcntid | inst_cpucfg
                    | inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill
                    | inst_dbar | inst_ibar | inst_idle;
 assign src_no_rd = inst_dbar | inst_ibar | inst_idle |
@@ -545,7 +556,7 @@ wire       issue_ertn   = ds_ex ? 1'b0 : inst_ertn;
 reg [31:0] instruction_seq_id;
 wire muldiv_class = inst_mul_w || inst_mulh_w || inst_mulh_wu ||
                     inst_div_w || inst_mod_w || inst_div_wu || inst_mod_wu;
-wire system_class = inst_syscall || inst_ertn || inst_idle ||
+wire system_class = inst_syscall || inst_ertn || inst_idle || inst_cpucfg ||
                     inst_rdcntv || inst_rdcntvh_w || inst_rdcntid;
 wire [3:0] issue_op_class = (inst_dbar || inst_ibar) ? `OP_CLASS_BARRIER :
                             (issue_tlb_op != 3'b0)   ? `OP_CLASS_TLB :

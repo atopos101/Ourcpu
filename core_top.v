@@ -878,14 +878,15 @@ assign redirect_cause = redirect_packet[`REDIRECT_REASON_HI:`REDIRECT_REASON_LO]
 assign redirect_seq_id = redirect_packet[`REDIRECT_SEQ_HI:`REDIRECT_SEQ_LO];
 assign redirect_epoch = redirect_packet[`REDIRECT_EPOCH_HI:`REDIRECT_EPOCH_LO];
 
-branch_resolve_register u_branch_resolve_register(
-    .clk(clk), .reset(reset),
-    .kill(flush || ertn_flush || ibar_flush),
-    .in_valid(ex1_redirect_valid), .in_target(ex1_redirect_target),
-    .in_seq_id(ex1_redirect_seq_id), .in_epoch(ex1_redirect_epoch),
-    .out_valid(branch_redirect_valid), .out_target(branch_redirect_target),
-    .out_seq_id(branch_redirect_seq_id), .out_epoch(branch_redirect_epoch)
-);
+// EX1 already holds a registered instruction and produces a stable recovery
+// packet for the whole cycle.  Feed it straight into the unified redirect
+// register instead of inserting a second branch-only register in front of
+// it.  Commit-time exception/ERTN/IBAR inputs below retain priority over a
+// simultaneous (younger) branch redirect.
+assign branch_redirect_valid  = ex1_redirect_valid;
+assign branch_redirect_target = ex1_redirect_target;
+assign branch_redirect_seq_id = ex1_redirect_seq_id;
+assign branch_redirect_epoch  = ex1_redirect_epoch;
 
 redirect_register u_redirect_register(
     .clk(clk), .reset(reset),
@@ -944,6 +945,11 @@ wire        predictor_lookup_taken;
 wire [31:0] predictor_lookup_target;
 wire [2:0]  predictor_lookup_type;
 wire [15:0] predictor_lookup_meta;
+wire        predictor_lookup1_hit;
+wire        predictor_lookup1_taken;
+wire [31:0] predictor_lookup1_target;
+wire [2:0]  predictor_lookup1_type;
+wire [15:0] predictor_lookup1_meta;
 wire [63:0] predictor_update_count;
 wire        fetch_pred_valid = (ENABLE_BP != 0) ? predictor_lookup_hit : 1'b0;
 wire        fetch_pred_taken = (ENABLE_BP != 0) ? predictor_lookup_taken : 1'b0;
@@ -952,6 +958,13 @@ wire [31:0] fetch_pred_target = (ENABLE_BP != 0) ? predictor_lookup_target :
 wire [2:0]  fetch_pred_type = (ENABLE_BP != 0) ? predictor_lookup_type :
                                                  `PRED_TYPE_NONE;
 wire [15:0] fetch_pred_meta = (ENABLE_BP != 0) ? predictor_lookup_meta : 16'b0;
+wire        fetch_pred1_valid = (ENABLE_BP != 0) ? predictor_lookup1_hit : 1'b0;
+wire        fetch_pred1_taken = (ENABLE_BP != 0) ? predictor_lookup1_taken : 1'b0;
+wire [31:0] fetch_pred1_target = (ENABLE_BP != 0) ? predictor_lookup1_target :
+                                                    (inst_vaddr + 32'd8);
+wire [2:0]  fetch_pred1_type = (ENABLE_BP != 0) ? predictor_lookup1_type :
+                                                  `PRED_TYPE_NONE;
+wire [15:0] fetch_pred1_meta = (ENABLE_BP != 0) ? predictor_lookup1_meta : 16'b0;
 
 wire [7:0] hw_int_in_safe;
 assign hw_int_in_safe = {
@@ -996,6 +1009,11 @@ branch_predictor u_branch_predictor(
     .lookup_target(predictor_lookup_target),
     .lookup_type(predictor_lookup_type),
     .lookup_meta(predictor_lookup_meta),
+    .lookup1_hit(predictor_lookup1_hit),
+    .lookup1_taken(predictor_lookup1_taken),
+    .lookup1_target(predictor_lookup1_target),
+    .lookup1_type(predictor_lookup1_type),
+    .lookup1_meta(predictor_lookup1_meta),
     .update_valid(bp_update_valid), .update_pc(bp_update_pc),
     .update_taken(bp_update_taken), .update_target(bp_update_target),
     .update_type(bp_update_type), .update_meta(bp_update_meta),
@@ -1025,6 +1043,11 @@ if1_stage if1_stage(
     .pred_target         (fetch_pred_target   ),
     .pred_type           (fetch_pred_type     ),
     .pred_meta           (fetch_pred_meta     ),
+    .pred1_valid         (fetch_pred1_valid   ),
+    .pred1_taken         (fetch_pred1_taken   ),
+    .pred1_target        (fetch_pred1_target  ),
+    .pred1_type          (fetch_pred1_type    ),
+    .pred1_meta          (fetch_pred1_meta    ),
     .if1_to_if2_valid    (if1_to_if2_valid    ),
     .if1_to_if2_bus      (if1_to_if2_bus      ),
     .inst_sram_req       (inst_sram_req       ),
@@ -1423,7 +1446,7 @@ companion_lane u_companion_lane(
     .wb_rf_wdata       (lane1_wb_rf_wdata)
 );
 
-/*
+
 // Baseline performance counters.  They are intentionally kept inside
 // mycpu_core so simulation, ILA or a later CSR mapping can observe the same
 // definitions without changing the architectural interface.
@@ -1505,7 +1528,7 @@ always @(posedge clk) begin
         if (bp_update_valid)
             bp_update_count <= bp_update_count + 64'd1;
     end
-end*/
+end
 
 `ifdef SIMU
 // Keep the instruction and side-effect information beside the normal

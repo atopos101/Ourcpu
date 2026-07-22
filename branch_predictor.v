@@ -24,6 +24,11 @@ module branch_predictor #(
     output wire [31:0] lookup_target,
     output wire [ 2:0] lookup_type,
     output wire [15:0] lookup_meta,
+    output wire        lookup1_hit,
+    output wire        lookup1_taken,
+    output wire [31:0] lookup1_target,
+    output wire [ 2:0] lookup1_type,
+    output wire [15:0] lookup1_meta,
 
     input  wire        update_valid,
     input  wire [31:0] update_pc,
@@ -96,6 +101,41 @@ assign lookup_type = lookup_hit ? lookup_btb_type : `PRED_TYPE_NONE;
 // The metadata is a lookup-time snapshot.  The public packet reserves eight
 // bits each for committed global history and the actual gshare table index.
 assign lookup_meta = {global_history, lookup_bht_index};
+
+// The upper word of a 64-bit fetch block needs an independent lookup.
+// This is a second read view of the same small tables; it adds no predictor
+// state, update port, or pipeline stage.
+wire [31:0] lookup1_pc = lookup_pc + 32'd4;
+wire [BTB_SET_BITS-1:0] lookup1_set =
+    lookup1_pc[BTB_SET_BITS+1:2];
+wire [BTB_TAG_BITS-1:0] lookup1_tag =
+    lookup1_pc[31:BTB_SET_BITS+2];
+wire lookup1_way0_hit = btb_valid0[lookup1_set] &&
+                        (btb_tag0[lookup1_set] == lookup1_tag);
+wire lookup1_way1_hit = btb_valid1[lookup1_set] &&
+                        (btb_tag1[lookup1_set] == lookup1_tag);
+wire lookup1_btb_hit = lookup1_way0_hit || lookup1_way1_hit;
+wire [2:0] lookup1_btb_type = lookup1_way0_hit ?
+                              btb_type0[lookup1_set] :
+                              btb_type1[lookup1_set];
+wire [31:0] lookup1_btb_target = lookup1_way0_hit ?
+                                 btb_target0[lookup1_set] :
+                                 btb_target1[lookup1_set];
+wire [BHT_BITS-1:0] lookup1_bht_index =
+    lookup1_pc[BHT_BITS+1:2] ^ global_history;
+wire lookup1_conditional_taken = bht_valid[lookup1_bht_index] &&
+                                 bht[lookup1_bht_index][1];
+wire lookup1_is_conditional =
+    lookup1_btb_type == `PRED_TYPE_CONDITIONAL;
+wire lookup1_is_return = lookup1_btb_type == `PRED_TYPE_RETURN;
+assign lookup1_hit = lookup_valid && lookup1_btb_hit;
+assign lookup1_taken = lookup1_hit &&
+                       (!lookup1_is_conditional ||
+                        lookup1_conditional_taken);
+assign lookup1_target = (lookup1_hit && lookup1_is_return && ras_available) ?
+                        ras[ras_top_index] : lookup1_btb_target;
+assign lookup1_type = lookup1_hit ? lookup1_btb_type : `PRED_TYPE_NONE;
+assign lookup1_meta = {global_history, lookup1_bht_index};
 
 wire [BTB_SET_BITS-1:0] update_set =
     update_pc[BTB_SET_BITS+1:2];

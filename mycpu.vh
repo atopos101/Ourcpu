@@ -5,7 +5,7 @@
 // datapath intact and exposes these names as the migration boundary.
 `define FETCH_EPOCH_WD      4
 `define FETCH_PRED_SNAPSHOT_WD 85 // {pc_next,pred_valid,taken,target,type,meta}
-`define IF1_TO_IF2_BUS_WD 137    // request metadata plus prediction snapshot
+`define IF1_TO_IF2_BUS_WD 190    // request metadata plus two prediction snapshots
 `define IF2_TO_ID_BUS_WD  169    // legacy alias; full fetch packet
 // Canonical instruction packet.  Keep every field position here: pipeline
 // stages must use instruction_packet_pack/unpack instead of anonymous

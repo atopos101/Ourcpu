@@ -26,6 +26,11 @@ module if1_stage(
     input  [31:0]                  pred_target    ,
     input  [ 2:0]                  pred_type      ,
     input  [15:0]                  pred_meta      ,
+    input                          pred1_valid    ,
+    input                          pred1_taken    ,
+    input  [31:0]                  pred1_target   ,
+    input  [ 2:0]                  pred1_type     ,
+    input  [15:0]                  pred1_meta     ,
     //to if2
     output                         if1_to_if2_valid,
     output [`IF1_TO_IF2_BUS_WD -1:0] if1_to_if2_bus,
@@ -60,6 +65,11 @@ reg         if1b_pred_taken;
 reg  [31:0] if1b_pred_target;
 reg  [ 2:0] if1b_pred_type;
 reg  [15:0] if1b_pred_meta;
+reg         if1b_pred1_valid;
+reg         if1b_pred1_taken;
+reg  [31:0] if1b_pred1_target;
+reg  [ 2:0] if1b_pred1_type;
+reg  [15:0] if1b_pred1_meta;
 
 wire        fetch_adef;
 wire        fetch_ex;
@@ -89,7 +99,12 @@ assign if1_to_if2_bus   = {if1b_pc,
                            if1b_pred_taken,
                            if1b_pred_target,
                            if1b_pred_type,
-                           if1b_pred_meta};
+                           if1b_pred_meta,
+                           if1b_pred1_valid,
+                           if1b_pred1_taken,
+                           if1b_pred1_target,
+                           if1b_pred1_type,
+                           if1b_pred1_meta};
 
 assign inst_vaddr = if1_req ? req_pc : fetch_pc;
 
@@ -106,8 +121,10 @@ assign current_epoch = fetch_epoch;
 // at the lower word of its aligned eight-byte block.  From an address ending
 // in ...4, advancing by eight would skip the next sequential instruction.
 wire [31:0] sequential_next_pc = req_pc + (req_pc[2] ? 32'd4 : 32'd8);
+wire use_slot1_prediction = !req_pc[2] && pred1_valid && pred1_taken;
 assign predicted_next_pc = (pred_valid && pred_taken) ? pred_target :
-                                                       sequential_next_pc;
+                           use_slot1_prediction ? pred1_target :
+                                                  sequential_next_pc;
 
 always @(posedge clk) begin
     if (reset) begin
@@ -158,6 +175,11 @@ always @(posedge clk) begin
         if1b_pred_target <= 32'b0;
         if1b_pred_type <= `PRED_TYPE_NONE;
         if1b_pred_meta <= 16'b0;
+        if1b_pred1_valid <= 1'b0;
+        if1b_pred1_taken <= 1'b0;
+        if1b_pred1_target <= 32'b0;
+        if1b_pred1_type <= `PRED_TYPE_NONE;
+        if1b_pred1_meta <= 16'b0;
     end
     else begin
         if (redirect_valid) begin
@@ -180,6 +202,12 @@ always @(posedge clk) begin
             // discovered conditional branch must train the lookup-time BHT
             // entry rather than an entry selected several stages later.
             if1b_pred_meta <= pred_meta;
+            if1b_pred1_valid <= !req_pc[2] && pred1_valid;
+            if1b_pred1_taken <= !req_pc[2] && pred1_valid && pred1_taken;
+            if1b_pred1_target <= pred1_valid ? pred1_target :
+                                             (req_pc + 32'd8);
+            if1b_pred1_type <= pred1_valid ? pred1_type : `PRED_TYPE_NONE;
+            if1b_pred1_meta <= pred1_meta;
         end
         else if (if1_out_fire) begin
             if1b_valid <= 1'b0;
@@ -393,9 +421,14 @@ wire in_pred_valid, in_pred_taken;
 wire [31:0] in_pred_target;
 wire [2:0] in_pred_type;
 wire [15:0] in_pred_meta;
+wire in_pred1_valid, in_pred1_taken;
+wire [31:0] in_pred1_target;
+wire [2:0] in_pred1_type;
+wire [15:0] in_pred1_meta;
 assign {in_pc, in_epoch, in_ex, in_ecode, in_esubcode,
         in_pc_next, in_pred_valid, in_pred_taken, in_pred_target,
-        in_pred_type, in_pred_meta} = if1_to_if2_bus;
+        in_pred_type, in_pred_meta, in_pred1_valid, in_pred1_taken,
+        in_pred1_target, in_pred1_type, in_pred1_meta} = if1_to_if2_bus;
 
 wire [31:0] head_pc;
 wire [`FETCH_EPOCH_WD-1:0] head_epoch;
@@ -407,9 +440,15 @@ wire head_pred_valid, head_pred_taken;
 wire [31:0] head_pred_target;
 wire [2:0] head_pred_type;
 wire [15:0] head_pred_meta;
+wire head_pred1_valid, head_pred1_taken;
+wire [31:0] head_pred1_target;
+wire [2:0] head_pred1_type;
+wire [15:0] head_pred1_meta;
 assign {head_pc, head_epoch, head_ex, head_ecode, head_esubcode,
         head_pc_next, head_pred_valid, head_pred_taken, head_pred_target,
-        head_pred_type, head_pred_meta} = meta_entries[meta_rd_ptr];
+        head_pred_type, head_pred_meta, head_pred1_valid, head_pred1_taken,
+        head_pred1_target, head_pred1_type, head_pred1_meta} =
+        meta_entries[meta_rd_ptr];
 
 wire resp_out_fire = if2_to_queue_valid && if2_to_queue_ready;
 wire response_arrives = inst_sram_data_ok && (meta_count != 0);
@@ -449,7 +488,8 @@ wire [`FS_TO_DS_BUS_WD-1:0] memory_packet =
 wire [`FS_TO_DS_BUS_WD-1:0] memory_packet1 =
     {inst_sram_resp_data[63:32], head_pc + 32'd4, head_epoch,
      1'b0, 6'b0, 9'b0, head_pc + 32'd8,
-     1'b0, 1'b0, head_pc + 32'd8, `PRED_TYPE_NONE, 16'b0};
+     head_pred1_valid, head_pred1_taken, head_pred1_target,
+     head_pred1_type, head_pred1_meta};
 wire memory_slot1_valid = response_current &&
                           inst_sram_resp_word_valid[1] &&
                           !head_pc[2] &&
@@ -613,6 +653,11 @@ if1_stage u_if1_stage(
     .pred_target         (inst_vaddr + 32'd4 ),
     .pred_type           (`PRED_TYPE_NONE     ),
     .pred_meta           (16'b0               ),
+    .pred1_valid         (1'b0                ),
+    .pred1_taken         (1'b0                ),
+    .pred1_target        (inst_vaddr + 32'd8  ),
+    .pred1_type          (`PRED_TYPE_NONE     ),
+    .pred1_meta          (16'b0               ),
     .if1_to_if2_valid    (if1_to_if2_valid    ),
     .if1_to_if2_bus      (if1_to_if2_bus      ),
     .inst_sram_req       (inst_sram_req       ),
