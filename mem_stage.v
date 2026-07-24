@@ -127,45 +127,48 @@ end
 
 wire [7:0]  load_byte;
 wire [15:0] load_half;
+wire [3:0] load_byte_sel = 4'b0001 << ms_alu_result[1:0];
+wire [1:0] load_half_sel = {ms_alu_result[1], ~ms_alu_result[1]};
 
-assign load_byte =
-       (ms_alu_result[1:0] == 2'b00) ? data_sram_rdata[7:0]   :
-       (ms_alu_result[1:0] == 2'b01) ? data_sram_rdata[15:8]  :
-       (ms_alu_result[1:0] == 2'b10) ? data_sram_rdata[23:16] :
-                                       data_sram_rdata[31:24];
+// Address decodes are naturally one-hot.  Express the extractors as
+// parallel AND-OR muxes so synthesis need not build a priority mux chain.
+assign load_byte = ({8{load_byte_sel[0]}} & data_sram_rdata[ 7: 0]) |
+                   ({8{load_byte_sel[1]}} & data_sram_rdata[15: 8]) |
+                   ({8{load_byte_sel[2]}} & data_sram_rdata[23:16]) |
+                   ({8{load_byte_sel[3]}} & data_sram_rdata[31:24]);
 
-assign load_half =
-       ms_alu_result[1]
-    ? data_sram_rdata[31:16]
-    : data_sram_rdata[15:0];
+assign load_half = ({16{load_half_sel[0]}} & data_sram_rdata[15: 0]) |
+                   ({16{load_half_sel[1]}} & data_sram_rdata[31:16]);
 
 //==========================================================
 // mem result
 //==========================================================
 
 wire [31:0] mem_result;
+wire load_size_byte = ms_mem_size == 2'b00;
+wire load_size_half = ms_mem_size == 2'b01;
+wire load_size_word = !(load_size_byte || load_size_half);
+wire [31:0] load_byte_result =
+    {{24{~ms_mem_unsigned & load_byte[7]}}, load_byte};
+wire [31:0] load_half_result =
+    {{16{~ms_mem_unsigned & load_half[15]}}, load_half};
 
-assign mem_result =
-       (ms_mem_size == 2'b00)
-    ? {{24{~ms_mem_unsigned & load_byte[7]}}, load_byte}
-
-    : (ms_mem_size == 2'b01)
-    ? {{16{~ms_mem_unsigned & load_half[15]}}, load_half}
-
-    : data_sram_rdata;
+assign mem_result = ({32{load_size_byte}} & load_byte_result) |
+                    ({32{load_size_half}} & load_half_result) |
+                    ({32{load_size_word}} & data_sram_rdata);
 
 //==========================================================
 // final result
 //==========================================================
 
 wire [31:0] ms_final_result;
+wire final_sel_sc   = ms_inst_sc_w;
+wire final_sel_load = !ms_inst_sc_w && ms_res_from_mem;
+wire final_sel_alu  = !ms_inst_sc_w && !ms_res_from_mem;
 
-assign ms_final_result =
-       ms_inst_sc_w
-    ? {31'b0, ms_sc_success}
-    :  ms_res_from_mem
-    ? mem_result
-    : ms_alu_result;
+assign ms_final_result = ({32{final_sel_sc}} & {31'b0, ms_sc_success}) |
+                         ({32{final_sel_load}} & mem_result) |
+                         ({32{final_sel_alu}} & ms_alu_result);
 
 wire ms_out_fire = ms_to_ws_valid && ms_to_ws_ready;
 wire ms_in_fire  = ex3_to_mem_valid && ex3_to_mem_ready;

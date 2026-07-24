@@ -1,7 +1,3 @@
-// The XSIM compile file list contains third-party IP that leaves
-// `default_nettype set to none.  Make this legacy Verilog compilation unit
-// self-contained so ANSI input/output ports retain their implicit wire type.
-`default_nettype wire
 `include "mycpu.vh"
 
 module ex1_stage(
@@ -153,10 +149,15 @@ wire [3:0] st_w_we    = 4'b1111;
 wire [31:0] st_b_wdata = {4{rkd_value[7:0]}} << {mem_addr[1:0], 3'b000};
 wire [31:0] st_h_wdata = mem_addr[1] ? {rkd_value[15:0], 16'b0} : {16'b0, rkd_value[15:0]};
 wire [31:0] st_w_wdata = rkd_value;
-wire [3:0] store_wstrb = (mem_size == 2'b00) ? st_b_we :
-                         (mem_size == 2'b01) ? st_h_we : st_w_we;
-wire [31:0] store_wdata = (mem_size == 2'b00) ? st_b_wdata :
-                           (mem_size == 2'b01) ? st_h_wdata : st_w_wdata;
+wire store_size_byte = mem_size == 2'b00;
+wire store_size_half = mem_size == 2'b01;
+wire store_size_word = !(store_size_byte || store_size_half);
+wire [3:0] store_wstrb = ({4{store_size_byte}} & st_b_we) |
+                         ({4{store_size_half}} & st_h_we) |
+                         ({4{store_size_word}} & st_w_we);
+wire [31:0] store_wdata = ({32{store_size_byte}} & st_b_wdata) |
+                          ({32{store_size_half}} & st_h_wdata) |
+                          ({32{store_size_word}} & st_w_wdata);
 
 assign ex1_to_ex2_valid = ex1_valid;
 assign ex1_to_ex2_bus   = {branch_is_control_flow, branch_actual_taken,

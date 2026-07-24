@@ -2,9 +2,10 @@
 `default_nettype wire
 `include "mycpu.vh"
 
-// Ordered three-entry sliding issue queue.  Lane1 is a restricted companion lane:
-// only two independent, exception-free scalar ALU operations may leave in
-// parallel.  Every other bundle is split without changing program order.
+// Ordered three-entry sliding issue queue.  Lane1 is a restricted scalar-ALU
+// companion lane.  An independent ALU operation may accompany an ALU,
+// multiply/divide, or ordinary load/store operation in lane0; special
+// cache/atomic memory operations remain serialized.
 module issue_stage(
     input                               clk,
     input                               reset,
@@ -109,6 +110,7 @@ wire ertn0;
 wire [2:0] tlb_op0;
 wire [3:0] op_class0, op_class1;
 wire exception0, exception1;
+wire inst_ll_w0, inst_sc_w0, inst_cacop0;
 
 instruction_packet_unpack u_unpack0(
     .packet(packet0), .exception_valid(exception0),
@@ -117,7 +119,9 @@ instruction_packet_unpack u_unpack0(
     .rj_value(rj0), .rkd_value(rkd0),
     .dst_valid(dst_valid0), .dst_reg(dst0),
     .csr_op(csr_op0), .csr_num(csr_num0), .inst_ertn(ertn0),
-    .tlb_op(tlb_op0), .op_class(op_class0)
+    .tlb_op(tlb_op0), .op_class(op_class0),
+    .inst_ll_w(inst_ll_w0), .inst_sc_w(inst_sc_w0),
+    .inst_cacop(inst_cacop0)
 );
 instruction_packet_unpack u_unpack1(
     .packet(packet1), .exception_valid(exception1),
@@ -203,8 +207,15 @@ wire lane1_reads_lane0 =
     ((src_valid1[0] && src10 == dst0) ||
      (src_valid1[1] && src11 == dst0) ||
      (src_valid1[2] && src12 == dst0));
+wire lane0_pairable_memory =
+    (op_class0 == `OP_CLASS_MEMORY) &&
+    !inst_ll_w0 && !inst_sc_w0 && !inst_cacop0;
+wire lane0_pairable =
+    (op_class0 == `OP_CLASS_ALU) ||
+    (op_class0 == `OP_CLASS_MULDIV) ||
+    lane0_pairable_memory;
 wire pair_static = valid0 && valid1 &&
-                   (op_class0 == `OP_CLASS_ALU) &&
+                   lane0_pairable &&
                    (op_class1 == `OP_CLASS_ALU) &&
                    // A dependency on slot 0 still requires ordered split
                    // issue.  Dependencies on older instructions are legal
@@ -340,7 +351,7 @@ always @(posedge clk) begin
     if (!reset && valid2 && !(seq1 < seq2))
         $error("issue queue sequence order is not slot1 < slot2");
     if (!reset && pair_fire && (lane1_reads_lane0 ||
-        op_class0 != `OP_CLASS_ALU || op_class1 != `OP_CLASS_ALU))
+        !lane0_pairable || op_class1 != `OP_CLASS_ALU))
         $error("illegal lane1 pairing");
     if (!reset && valid0 &&
         ((hit00 && !(ps00 < seq0)) || (hit01 && !(ps01 < seq0)) ||
