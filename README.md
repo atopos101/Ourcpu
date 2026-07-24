@@ -79,7 +79,19 @@ lane0/lane1 × {EX1, EX2, EX3, MEM, WB}
 {valid, seq_id, dst_valid, dst, value_valid, value}
 ```
 
-`producer_resolver` 只选择 `seq_id` 小于消费者的 producer，并从所有同名在途结果中选择程序顺序上最新的 older producer。只有所选结果的 `value_valid` 为真时消费者才能发射；load、CSR、乘除法、SC 等结果尚未就绪时，指令会稳定停留在 Issue。
+`producer_resolver` 接收的 producer 按“新到旧”顺序打包：最低位 slice 0 最新、slice 9 最旧。所有送入 Issue 的 producer 均已按流水线位置保证为消费者之前的在途指令，因此 resolver 不在该关键路径上比较 32 位 `seq_id`；`seq_id` 仅保留给年龄断言、调试和重定向相关元数据。
+
+为缩短 EX2 前递至 lane1 `ex1_side_reg` 的组合关键路径，10 路固定 producer 被拆分为两个并行的五路优先选择组：
+
+```text
+新组：slice 0..4  ─┐
+                   ├─ 新组命中优先 ─> selected producer
+旧组：slice 5..9  ─┘
+```
+
+每个组内使用 `casez` 保持较低 slice 优先；最终组选择固定为新组优先于旧组。因此多条在途指令写同一 GPR 时，仍选择最新的匹配 producer，优先级严格为 slice 0、1、…、9。若选中的 producer `value_valid=0`，resolver 仍输出 `hit=1`、`value_valid=0`，使 Issue 保持停顿，绝不会回退到旧 producer 或寄存器堆值。
+
+该实现固定对应 `PRODUCER_COUNT == 10`。若未来变更 producer 数量，必须同步调整 `producer_resolver` 的分组和选择逻辑。
 
 寄存器堆使用逻辑 4R2W 接口，支持两个 Decode lane 同时读取和两个 WB lane 同时写入。读端带双写口 write-through，以处理读取与退休发生在同一时钟边沿的情况。
 
@@ -251,6 +263,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/run_branch_prediction.
 - 连续独立 ALU 的稳定 2 IPC；
 - 跨 8 字节边界取指、taken slot0 对 slot1 的取消；
 - 组内 RAW 拆包、跨 bundle 配对、三项窗口压紧、跨周期 RAW/WAW、load-use 和乘除法等待；
+- producer 前递优先级：同一 GPR 的多级连续写必须选择最低 slice 的匹配 producer；命中未就绪 load/CSR/乘除法/SC 结果时必须停顿，不能回退到寄存器堆或较旧结果；
 - 分支错误预测、异常、中断和 redirect 时 lane1 的取消；
 - `CPUCFG` 零值响应、CSR/TLB、Cache miss、非缓存访问、LL/SC、`CACOP`、`DBAR/IBAR` 和 `IDLE`；
 - 随机 backpressure 下不丢失、不重复、不乱序。
